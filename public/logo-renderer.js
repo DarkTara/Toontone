@@ -90,6 +90,10 @@
       ctx.putImageData(out, 0, 0);
     }
 
+    function renderOriginal() {
+      ctx.putImageData(original, 0, 0);
+    }
+
     function sampleAtEvent(evt) {
       const rect = canvas.getBoundingClientRect();
       const x = Math.max(0, Math.min(w - 1, Math.floor((evt.clientX - rect.left) * w / rect.width)));
@@ -103,12 +107,15 @@
     rebuildMask(targetHex, tolerance);
     render(null);
     function maskStats() {
-      let count = 0;
-      for (const v of mask) count += v;
-      return { matchedPixels: count, totalPixels: mask.length, ratio: mask.length ? count / mask.length : 0 };
+      let count = 0, opaque = 0;
+      for (let p = 0, i = 0; p < mask.length; p++, i += 4) {
+        if (original.data[i + 3] >= 20) opaque++;
+        if (mask[p]) count++;
+      }
+      return { matchedPixels: count, totalPixels: opaque, ratio: opaque ? count / opaque : 0 };
     }
 
-    return { render, rebuildMask, sampleAtEvent, maskStats, width: w, height: h };
+    return { render, renderOriginal, rebuildMask, sampleAtEvent, maskStats, width: w, height: h };
   }
 
   window.LogoTone = { create };
