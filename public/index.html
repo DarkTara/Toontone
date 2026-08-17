@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Toon Tone Tour</title><link rel="stylesheet" href="/styles.css"></head>
+<body>
+<header class="topbar"><div class="topbar-inner"><div class="brand"><div class="brand-mark">🚲</div><div><div class="tour-word">TOON TONE TOUR</div><div class="tiny muted">La couleur dans le peloton</div></div></div><div class="room-pill" id="roomPill">Salle —</div></div></header>
+<main class="container">
+<section id="joinView" class="hero">
+  <div class="card hero-card race-card"><div class="kicker">Jeu multijoueur en direct</div><h1>À toi de retrouver la couleur.</h1><p class="lede">Une seule couleur du logo est masquée. Les autres restent intactes : choisis la teinte qui te semble la plus fidèle, valide avant la fin du chrono et grimpe au général.</p><div class="divider"></div><div class="grid grid-3"><div><strong>🟨 Maillot jaune</strong><div class="tiny muted">Meilleure proximité moyenne</div></div><div><strong>🟩 Maillot vert</strong><div class="tiny muted">Temps cumulé le plus faible</div></div><div><strong>🔴 Maillot à pois</strong><div class="tiny muted">Points des logos difficiles</div></div></div></div>
+  <div class="card"><div class="kicker">Rejoindre l'étape</div><h2>Entre dans le peloton</h2><div class="field"><label for="name">Ton pseudo</label><input id="name" type="text" maxlength="24" placeholder="Ex. Sébastien"></div><div class="field"><label for="code">Code de salle</label><input id="code" type="text" maxlength="5" placeholder="ABCDE" style="text-transform:uppercase"></div><button id="joinBtn" class="btn-yellow" style="width:100%">Rejoindre la course</button><div id="joinStatus" class="status hidden" style="margin-top:12px"></div><p class="tiny muted">Animateur ? <a href="/admin.html"><strong>Ouvrir le poste de direction de course</strong></a></p></div>
+</section>
+<section id="gameView" class="hidden">
+  <div class="grid grid-3" id="standings"></div>
+  <div style="height:18px"></div>
+  <div class="card">
+    <div id="waitingView" class="logo-stage"><div><div class="kicker">Prochaine étape</div><h2>En attente du prochain logo…</h2><p class="muted">L'animateur va lancer la prochaine manche.</p></div></div>
+    <div id="roundView" class="logo-stage hidden"><div><div class="kicker">Logo en course</div><div class="logo-canvas-shell"><canvas id="logoCanvas" class="logo-canvas" aria-label="Logo à recolorer"></canvas></div><div id="logoName" class="round-name"></div><div id="timer" class="timer">20.0</div><div id="colorControls"><div class="color-area"><input id="colorPicker" class="color-picker" type="color" value="#A6A6A6"><span id="hexReadout" class="hex-readout">#A6A6A6</span><button id="submitColor" class="btn-green">Valider ma couleur</button></div><p class="tiny muted">La zone grise prend ta couleur en direct. Une seule réponse par logo.</p></div><div id="locked" class="answer-locked hidden">✅ Réponse enregistrée — attends l'arrivée.</div></div></div>
+    <div id="resultView" class="logo-stage hidden"><div style="width:100%;max-width:620px"><div class="result-banner"><div class="kicker" style="color:#ffdf00">Résultat de la manche</div><h2 id="resultLogo"></h2><div class="result-swatches"><div><div class="tiny">Ta couleur</div><div id="mySwatch" class="swatch"></div></div><div style="font-size:2rem">→</div><div><div class="tiny">Couleur cible</div><div id="targetSwatch" class="swatch"></div></div></div><div id="myResult" style="font-size:1.5rem;font-weight:1000"></div></div><div id="podium" class="podium"></div></div></div>
+  </div>
+</section>
+<div class="footer-note">Toon Tone Tour · GitHub + Railway · temps réel via Socket.IO</div>
+</main>
+<script src="/socket.io/socket.io.js"></script><script src="/logo-renderer.js"></script><script src="/app.js"></script>
+</body></html>
