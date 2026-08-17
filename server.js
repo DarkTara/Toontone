@@ -18,7 +18,7 @@ const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : pat
 const DATA_FILE = path.join(DATA_DIR, 'game-state.json');
 const DEFAULT_ROUND_SECONDS = Number(process.env.ROUND_SECONDS || 20);
 const COUNTDOWN_MS = 3000;
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 
 const DIFFICULTY_CATEGORIES = {
   easy:      { key:'easy',      label:'Facile',         emoji:'🟢', points:2 },
@@ -35,7 +35,10 @@ app.get('/version', (_, res) => res.json({
   selectiveRecolor: true,
   tours: true,
   customColorPicker: true,
-  finalPodium: true
+  finalPodium: true,
+  fullStageRanking: true,
+  answerExplorer: true,
+  extendedStats: true
 }));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -366,20 +369,70 @@ function buildAwards(rounds, tourStandings) {
     polka&&{key:'climber',emoji:'🏔️',title:'Grimpeur',playerId:polka.id,name:polka.name,detail:`${polka.mountainPoints} pts montagne`}
   ].filter(Boolean);
 }
+function median(values) {
+  if(!values.length)return 0;
+  const a=[...values].sort((x,y)=>x-y),m=Math.floor(a.length/2);
+  return a.length%2?a[m]:(a[m-1]+a[m])/2;
+}
 function buildTourSummary(activeTour, reason='finished') {
   const rounds=state.roundHistory.filter(h=>h.tourSessionId===activeTour.sessionId);
   const s=aggregateTourStandings(rounds);
   const answered=rounds.flatMap(h=>h.results.filter(r=>r.color));
-  const hardest=[...rounds].sort((a,b)=>b.difficultyPoints-a.difficultyPoints||((a.results.reduce((x,r)=>x+r.proximity,0)/(a.results.length||1))-(b.results.reduce((x,r)=>x+r.proximity,0)/(b.results.length||1))))[0]||null;
+  const allResults=rounds.flatMap(h=>h.results||[]);
+  const totalOpportunities=allResults.length;
+  const stageStats=rounds.map((h,idx)=>{
+    const answers=(h.results||[]).filter(r=>r.color);
+    const avg=answers.length?answers.reduce((x,r)=>x+(Number(r.proximity)||0),0)/answers.length:0;
+    const avgTime=answers.length?answers.reduce((x,r)=>x+(Number(r.elapsedMs)||0),0)/answers.length:0;
+    const gap=answers.length>=2?Math.max(0,(Number(answers[0].proximity)||0)-(Number(answers[1].proximity)||0)):null;
+    return {
+      id:h.id,stageNumber:h.tourStageNumber||h.roundNumber||idx+1,logoName:h.logoName,
+      difficultyPoints:h.difficultyPoints||0,difficultyLabel:h.difficultyLabel||'',difficultyEmoji:h.difficultyEmoji||'🏔️',
+      averageProximity:avg,averageTimeMs:avgTime,responseRate:(h.results?.length||0)?answers.length/h.results.length*100:0,
+      answerCount:answers.length,participantCount:h.results?.length||0,winner:answers[0]?{name:answers[0].name,proximity:answers[0].proximity}:null,gapTop2:gap
+    };
+  });
+  const hardest=[...rounds].sort((a,b)=>(b.difficultyPoints||0)-(a.difficultyPoints||0))[0]||null;
+  const easiestPractice=[...stageStats].filter(x=>x.answerCount).sort((a,b)=>b.averageProximity-a.averageProximity)[0]||null;
+  const toughestPractice=[...stageStats].filter(x=>x.answerCount).sort((a,b)=>a.averageProximity-b.averageProximity)[0]||null;
+  const closestFinish=[...stageStats].filter(x=>x.gapTop2!==null).sort((a,b)=>a.gapTop2-b.gapTop2)[0]||null;
+
+  const yellowRanks=rankMap(s.yellow),greenRanks=rankMap(s.green),polkaRanks=rankMap(s.polka);
+  const byPlayer=new Map();
+  rounds.forEach(h=>(h.results||[]).forEach(r=>{
+    if(!byPlayer.has(r.playerId))byPlayer.set(r.playerId,{playerId:r.playerId,name:r.name,played:0,answers:0,proxTotal:0,bestProximity:0,timeTotal:0,fastestTimeMs:null,wins:0,podiums:0,mountainPoints:0});
+    const p=byPlayer.get(r.playerId);p.played++;
+    if(r.color){p.answers++;p.proxTotal+=Number(r.proximity)||0;p.bestProximity=Math.max(p.bestProximity,Number(r.proximity)||0);p.timeTotal+=Number(r.elapsedMs)||0;p.fastestTimeMs=p.fastestTimeMs===null?Number(r.elapsedMs)||0:Math.min(p.fastestTimeMs,Number(r.elapsedMs)||0);}
+    if(r.roundRank===1)p.wins++;if(r.roundRank<=3)p.podiums++;p.mountainPoints+=Number(r.mountainGain)||0;
+  }));
+  const yellowById=new Map(s.yellow.map(p=>[p.id,p]));
+  const playerStats=[...byPlayer.values()].map(p=>({
+    ...p,averageProximity:p.answers?p.proxTotal/p.answers:0,averageTimeMs:p.answers?p.timeTotal/p.answers:0,
+    responseRate:p.played?p.answers/p.played*100:0,yellowAverage:yellowById.get(p.playerId)?.yellowAvg||0,
+    yellowRank:yellowRanks.get(p.playerId)||null,greenRank:greenRanks.get(p.playerId)||null,polkaRank:polkaRanks.get(p.playerId)||null
+  })).sort((a,b)=>(a.yellowRank||999)-(b.yellowRank||999));
+
+  const stages=rounds.map((h,idx)=>({
+    id:h.id,stageNumber:h.tourStageNumber||h.roundNumber||idx+1,logoName:h.logoName,targetColor:h.targetColor,
+    difficultyPoints:h.difficultyPoints||0,difficultyLabel:h.difficultyLabel||'',difficultyEmoji:h.difficultyEmoji||'🏔️',
+    participantCount:h.participantCount||h.results?.length||0,
+    results:(h.results||[]).map(r=>({playerId:r.playerId,name:r.name,color:r.color,proximity:r.proximity,elapsedMs:r.elapsedMs,roundRank:r.roundRank,mountainGain:r.mountainGain||0}))
+  }));
+
   return {
     id:uid('summary_'),sessionId:activeTour.sessionId,tourId:activeTour.tourId,name:activeTour.name,reason,endedAt:Date.now(),
     completedStages:rounds.length,totalStages:activeTour.logoIds.length,
-    standings:s,awards:buildAwards(rounds,s),
+    standings:s,awards:buildAwards(rounds,s),playerStats,stages,
     stats:{
-      players:new Set(rounds.flatMap(h=>h.results.map(r=>r.playerId))).size,
-      answers:answered.length,
-      averageProximity:answered.length?answered.reduce((x,r)=>x+r.proximity,0)/answered.length:0,
-      hardestLogo:hardest?{name:hardest.logoName,points:hardest.difficultyPoints}:null
+      players:new Set(allResults.map(r=>r.playerId)).size,
+      answers:answered.length,totalOpportunities,responseRate:totalOpportunities?answered.length/totalOpportunities*100:0,
+      averageProximity:answered.length?answered.reduce((x,r)=>x+(Number(r.proximity)||0),0)/answered.length:0,
+      medianProximity:median(answered.map(r=>Number(r.proximity)||0)),
+      averageResponseTimeMs:answered.length?answered.reduce((x,r)=>x+(Number(r.elapsedMs)||0),0)/answered.length:0,
+      over90:answered.filter(r=>(Number(r.proximity)||0)>=90).length,
+      over95:answered.filter(r=>(Number(r.proximity)||0)>=95).length,
+      hardestLogo:hardest?{name:hardest.logoName,points:hardest.difficultyPoints}:null,
+      easiestInPractice:easiestPractice,toughestInPractice:toughestPractice,closestFinish
     }
   };
 }

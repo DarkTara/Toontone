@@ -1,4 +1,4 @@
-# Toon Tone Tour V3.0 🚲🎨
+# Toon Tone Tour V3.1 🚲🎨
 
 Jeu multijoueur temps réel inspiré de Toon Tone, avec une identité Tour de France. Déploiement prévu sur **GitHub + Railway**.
 
@@ -58,7 +58,7 @@ Le projet doit être placé **directement à la racine du dépôt GitHub** :
     └── styles.css
 ```
 
-Après déploiement, `/version` doit retourner `3.0.0`.
+Après déploiement, `/version` doit retourner `3.1.0`.
 
 ## Utilisation rapide
 
@@ -70,3 +70,42 @@ Après déploiement, `/version` doit retourner `3.0.0`.
 6. À la fin, tous les joueurs voient automatiquement le classement final.
 
 Tu peux toujours utiliser le **mode libre** pour lancer un logo sans créer de Tour.
+
+
+## Nouveautés V3.1
+
+- Les trois classements généraux affichent désormais **tous les joueurs**, pas seulement les 7 premiers.
+- Après chaque étape, un **classement complet de l'étape** affiche rang, couleur/HEX, proximité, temps et points montagne.
+- L'écran de résultat reste affiché jusqu'au départ de l'étape suivante.
+- Le classement montagne conserve son identité rouge/blanche mais **sans motif à pois** afin d'améliorer la lisibilité.
+- L'écran final ajoute des statistiques de Tour et un tableau détaillé par joueur.
+- Un bouton **Voir toutes les réponses** permet de rejouer chaque étape et de comparer toutes les couleurs HEX des joueurs à la couleur cible.
+
+## Calcul exact du pourcentage de proximité
+
+Le score actuel n'est pas une distance RGB brute. Le serveur convertit d'abord la réponse du joueur et la couleur cible depuis sRGB vers l'espace colorimétrique **CIELAB (Lab)** avec un blanc de référence D65.
+
+1. Le code HEX est converti en composantes RGB 0–255.
+2. Les composantes sRGB sont linéarisées (correction gamma).
+3. Le RGB linéaire est converti en XYZ.
+4. XYZ est converti en Lab : `L*` représente la luminosité, `a*` l'axe vert↔rouge et `b*` l'axe bleu↔jaune.
+5. La distance utilisée est la distance euclidienne **Delta E 1976 (ΔE76)** :
+
+```text
+ΔE = sqrt((ΔL*)² + (Δa*)² + (Δb*)²)
+```
+
+6. Le score Toon Tone est ensuite :
+
+```text
+proximité = clamp(100 - ΔE, 0, 100)
+```
+
+Ainsi :
+- couleur identique : ΔE = 0 → **100 %** ;
+- ΔE = 5 → **95 %** ;
+- ΔE = 20 → **80 %** ;
+- ΔE = 50 → **50 %** ;
+- ΔE ≥ 100 → **0 %**.
+
+Le mot « pourcentage » désigne donc ici un **score de proximité ludique** et non un pourcentage scientifique absolu. CIELAB est utilisé parce qu'il est nettement plus pertinent visuellement qu'une simple différence entre les valeurs R, G et B.
