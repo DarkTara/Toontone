@@ -1,180 +1,205 @@
-# Toon Tone Tour V3.3 🚲🎨
+# Toon Tone Tour V4.0 — Grand Tour Edition 🚲🎨
 
-Jeu multijoueur temps réel de reconnaissance de couleurs de logos, avec une identité Tour de France. Déploiement prévu sur **GitHub + Railway**.
+Application multijoueur temps réel de reconnaissance des couleurs de logos, pensée pour une animation de groupe et déployable sur **GitHub + Railway**.
 
-## Nouveautés V3.3
+## V4.0 : ce qui change
 
-### ✅ Fin intelligente des étapes
+### 🎨 Refonte visuelle complète
 
-Par défaut, une étape se termine automatiquement dès que **tous les joueurs qui étaient en ligne au départ de l’étape** ont validé leur réponse. Les joueurs qui rejoignent en cours d’étape ne bloquent pas la fin automatique.
+- nouvelle identité Grand Tour côté joueur et organisateur ;
+- écran de connexion plus immersif ;
+- cockpit animateur réorganisé autour des actions importantes ;
+- cartes de classement plus lisibles ;
+- nouvelle mise en page de la manche, des résultats et du classement final ;
+- responsive téléphone / tablette / desktop.
 
-Si un joueur se déconnecte ou rencontre un problème, l’animateur peut le retirer uniquement de l’étape en cours depuis la carte **Joueurs**. Il n’est alors pas pénalisé et la fin automatique est recalculée immédiatement.
+### ⚡ Assistant « Partie rapide »
 
-Cette option peut être désactivée depuis la préparation du Tour ou le mode libre.
+En haut de la direction de course :
 
-### 🔀 Ordre aléatoire des Tours
+1. donne un nom à la partie ;
+2. choisis le nombre d’étapes ;
+3. choisis une sélection équilibrée ou aléatoire ;
+4. choisis un preset ;
+5. clique sur **Générer & lancer**.
 
-Deux possibilités :
+Aucun Tour enregistré n’est obligatoire.
 
-- **Mélanger** dans l’éditeur : l’ordre visible de la playlist est modifié, puis peut être sauvegardé.
-- **Ordre aléatoire à chaque départ** : la playlist enregistrée reste intacte, mais une nouvelle permutation est créée pour chaque partie.
+Presets inclus :
 
-L’historique conserve naturellement l’ordre réellement joué.
+- **⚡ Rapide** — 12 s, résultats courts, enchaînement automatique ;
+- **🎉 Soirée** — 20 s, rythme équilibré ;
+- **🏆 Compétitif** — score un peu plus exigeant et seuil de qualification plus élevé ;
+- **🧠 Expert** — 25 s et score plus sévère.
 
-### ⚡ Préparation express
+### 🗂️ Bibliothèque de logos avancée
 
-La direction de course peut désormais :
+- recherche par nom, catégorie ou tag ;
+- filtres par difficulté et catégorie ;
+- tri A→Z, difficulté, utilisation ou besoin d’étalonnage ;
+- catégories de marque et tags personnalisés ;
+- sélection multiple ;
+- ajout de plusieurs logos au Tour en un clic ;
+- suppression multiple ;
+- indication du nombre de fois où un logo a été joué et utilisé dans des Tours.
 
-- générer automatiquement un Tour de 5, 10, 15, 20… étapes ;
-- choisir une sélection **100 % aléatoire** ou **équilibrée par difficulté** ;
-- ajouter tout le catalogue en un clic ;
-- mélanger ou vider la playlist ;
-- dupliquer un Tour existant ;
-- utiliser **Enregistrer & lancer** pour partir directement ;
-- voir avant le départ une estimation de durée, le nombre de joueurs en ligne, la répartition des difficultés, l’état de sécurisation et les éventuels doublons.
+### 📊 Étalonnage de difficulté V2
 
-### 🛠️ Gestion d’incidents
+L’étalonnage repose désormais sur toutes les réponses historiques du logo avec :
 
-Pendant une étape, l’animateur dispose maintenant de :
+- une moyenne observée ;
+- une moyenne ajustée avec un a priori afin d’éviter de sur-réagir après quelques réponses ;
+- un niveau de confiance selon la taille de l’échantillon ;
+- une tendance basée sur les dernières manches ;
+- une suggestion de catégorie après un minimum de réponses ;
+- la possibilité de **verrouiller** la difficulté d’un logo pour ignorer les recommandations automatiques.
 
-- **Pause / Reprendre** : le chrono est gelé et le temps de pause n’entre pas dans le temps de réponse ;
-- **+10 s** : ajoute du temps au chrono ;
-- **Terminer maintenant** ;
-- **Annuler & rejouer** : aucun score n’est enregistré et la même étape peut repartir ;
-- **Passer l’étape** dans un Tour : aucun score n’est attribué et le Tour continue.
+Les catégories restent : 2 / 5 / 10 / 15 / 20 points montagne.
 
-Pour chaque joueur, l’animateur peut aussi :
+### 🏆 Records persistants & carrières
 
-- le renommer ;
-- lui rendre sa réponse pour qu’il valide à nouveau ;
-- le retirer uniquement de l’étape en cours ;
-- supprimer un joueur, utile en cas de doublon.
+Les records sont conservés entre les parties :
 
-Les pauses, ajouts de temps, annulations et sauts d’étapes d’un Tour sont conservés dans les données de la partie archivée.
+- meilleure précision ;
+- réponse ≥ 90 % la plus rapide ;
+- plus grand écart à la cible ;
+- meilleure moyenne sur un Tour ;
+- record de points montagne.
 
----
+La page finale signale les nouveaux records battus. Le cockpit admin contient aussi un **Hall of Fame** et un classement de carrière par pseudo : parties, victoires, victoires d’étapes, podiums et meilleure moyenne.
 
-## Fonctionnalités héritées de la V3.2
+### 🛡️ Reprise après incident / redémarrage Railway
 
-### 🔐 La vraie réponse reste côté serveur
-Pendant une manche, le navigateur joueur ne reçoit plus :
+Si Railway redémarre pendant un Tour, la V4 détecte la course interrompue et affiche une bannière **Reprise après incident** dans l’admin.
 
-- la couleur cible HEX ;
-- le logo original contenant la couleur cible.
+- les étapes déjà terminées et les scores restent enregistrés ;
+- l’étape interrompue n’est pas comptabilisée ;
+- l’organisateur peut reprendre le Tour au même endroit après reconnexion des joueurs ;
+- l’enchaînement automatique est désactivé lors de la reprise pour éviter un départ avant le retour du peloton.
 
-Il reçoit uniquement :
+En plus, un **point de restauration** est créé avant chaque étape. L’organisateur peut revenir à l’état précédent si une étape a été validée alors qu’un incident important devait l’annuler.
 
-- une image de jeu où la zone cible est déjà grisée ;
-- un masque binaire indiquant quels pixels le joueur peut recolorer.
+### ⚙️ Paramètres de gameplay
 
-La vraie couleur et le logo original ne sont envoyés qu'après l'arrivée de l'étape.
+Réglages configurables :
 
-Les logos créés avec une version précédente sont **sécurisés automatiquement par la page admin** au premier chargement de la V3.3. Laisse simplement `/admin.html` ouvert quelques secondes avant de lancer une course.
+- durée de l’étape ;
+- délai entre les résultats ;
+- fin automatique quand tous ont répondu ;
+- seuil de qualification au jaune / vert ;
+- multiplicateur du score CIEDE2000 ;
+- durée du compte à rebours ;
+- affichage ou masquage du code HEX ;
+- activation du maillot vert ;
+- activation du classement montagne.
 
-### 🧪 Score CIEDE2000
-Le classement jaune utilise maintenant **CIEDE2000 (ΔE00)**, une mesure colorimétrique plus proche de la perception humaine que ΔE76.
+Le code HEX reste **activé par défaut**.
 
-Le score affiché est :
+### 🩺 État du système
+
+La direction de course indique :
+
+- version serveur ;
+- capacité d’écriture du stockage ;
+- présence du volume Railway `/data` ;
+- nombre de logos sécurisés ;
+- nombre de parties archivées ;
+- dernière sauvegarde ;
+- dernières actions importantes de l’organisateur.
+
+## Mécaniques conservées
+
+- multijoueur Socket.IO ;
+- masquage sécurisé de la vraie couleur côté serveur ;
+- roue chromatique + HEX ;
+- score CIEDE2000 ;
+- maillot jaune : proximité moyenne ;
+- maillot vert : temps cumulé ajusté ;
+- montagne Top 5 : 100 / 75 / 50 / 30 / 15 % des points du logo ;
+- fin d’étape dès que tous les partants ont répondu ;
+- Tours fixes ou aléatoires ;
+- pause, reprise, +10 s, annulation, rejeu, saut d’étape ;
+- gestion des joueurs et doublons ;
+- historique des parties ;
+- statistiques finales et exploration de toutes les réponses.
+
+## Score CIEDE2000
+
+Le serveur transforme les couleurs sRGB en CIELAB puis calcule la distance perceptuelle **ΔE00** selon CIEDE2000.
+
+La formule par défaut est :
 
 ```text
 Score = max(0, 100 - 2 × ΔE00)
 ```
 
-Repères :
-
-- ΔE00 = 0 → 100 %
-- ΔE00 = 2 → 96 %
-- ΔE00 = 5 → 90 %
-- ΔE00 = 10 → 80 %
-- ΔE00 = 20 → 60 %
-- ΔE00 ≥ 50 → 0 %
-
-Le facteur ×2 garde une amplitude de jeu lisible malgré l'échelle plus compacte de CIEDE2000.
-
-### 🏁 Animations Grand Tour
-
-- compte à rebours 3…2…1 puis **GO !** ;
-- animation d'**arrivée d'étape** avec passage du vélo ;
-- animation renforcée quand un maillot change de leader ;
-- confettis au classement final.
-
-### 💾 Historique des parties
-Chaque Tour terminé est automatiquement archivé dans `/data/game-state.json` avec :
-
-- date et nom du Tour ;
-- classements jaune, vert et montagne ;
-- statistiques ;
-- récompenses ;
-- résultats de chaque étape ;
-- couleurs HEX choisies par chaque joueur.
-
-La direction de course peut consulter jusqu'aux **50 dernières parties**, ouvrir un résumé ou exporter les résultats en JSON.
-
-### 📊 Étalonnage de la difficulté
-Chaque logo accumule ses performances réelles : nombre d'étapes, nombre de réponses et proximité moyenne.
-
-À partir de **10 réponses**, Toon Tone propose une catégorie selon la moyenne observée :
-
-- moyenne ≥ 90 % → 🟢 Facile · 2 pts
-- moyenne ≥ 82 % → 🔵 Moyen · 5 pts
-- moyenne ≥ 72 % → 🟡 Difficile · 10 pts
-- moyenne ≥ 62 % → 🔴 Très difficile · 15 pts
-- moyenne < 62 % → ⚫ Hors catégorie · 20 pts
-
-La difficulté **n'est jamais modifiée silencieusement** : l'animateur choisit d'appliquer la suggestion pour un logo ou toutes les suggestions en une fois.
-
-## Maillot à pois
-
-Catégories :
-
-- 🟢 Facile : 2 pts
-- 🔵 Moyen : 5 pts
-- 🟡 Difficile : 10 pts
-- 🔴 Très difficile : 15 pts
-- ⚫ Hors catégorie : 20 pts
-
-Top 5 de chaque étape : **100 % / 75 % / 50 % / 30 % / 15 %** de la valeur de l'étape, arrondie au point le plus proche avec un minimum de 1 point.
+Le multiplicateur `2` est configurable dans la V4. Un preset compétitif ou expert peut donc rendre les écarts de couleur plus pénalisants sans modifier l’algorithme CIEDE2000 lui-même.
 
 ## Déploiement Railway
 
 Variables recommandées :
 
 ```text
-ADMIN_PASSWORD=un_vrai_mot_de_passe
+ADMIN_PASSWORD=un_mot_de_passe_solide
 DATA_DIR=/data
 ROUND_SECONDS=20
 ```
 
-Ajoute un volume Railway monté sur `/data` afin de conserver logos, Tours, historiques et étalonnages entre les redéploiements.
-
-Le projet doit être placé **directement à la racine du dépôt GitHub** :
+Ajoute un **Railway Volume** monté sur :
 
 ```text
-/
-├── server.js
-├── package.json
-├── railway.json
-├── README.md
-├── VERSION.txt
-└── public/
-    ├── index.html
-    ├── admin.html
-    ├── app.js
-    ├── admin.js
-    ├── logo-renderer.js
-    ├── color-picker.js
-    └── styles.css
+/data
 ```
 
-Après déploiement, `/version` doit retourner `3.3.0` avec `secureClientAnswer: true`, `scoringModel: "CIEDE2000"`, `autoEndWhenAllAnswered: true`, `randomTourOrder: true` et `incidentControls: true`.
+Le fichier persistant est :
 
-## Migration depuis V3.2 (ou une version précédente)
+```text
+/data/game-state.json
+```
 
-1. Remplace les fichiers du dépôt par ceux de la V3.3.
-2. Laisse Railway redéployer.
-3. Ouvre `/admin.html` et connecte-toi.
-4. Attends que le message **Sécurisation des anciens logos** disparaisse.
-5. Vérifie `/version`.
-6. Lance une partie normalement.
+Sans volume, l’application fonctionne mais les logos, historiques, records et Tours peuvent disparaître lors d’un redéploiement.
 
-Les logos, Tours et données déjà stockés dans `/data` sont conservés.
+## Vérification après déploiement
+
+Ouvre :
+
+```text
+/version
+```
+
+Tu dois obtenir une réponse contenant :
+
+```json
+{
+  "version": "4.0.0",
+  "scoringModel": "CIEDE2000",
+  "visualOverhaul": true,
+  "advancedLogoLibrary": true,
+  "quickGameWizard": true,
+  "persistentRecords": true,
+  "calibrationV2": true,
+  "crashRecovery": true,
+  "gameplayPresets": true,
+  "systemStatus": true
+}
+```
+
+Et `/health` permet de vérifier l’état de stockage et la présence du volume persistant.
+
+## Migration depuis V3.x
+
+La V4 charge automatiquement le format de données des V3 précédentes : logos, masques sécurisés, Tours, joueurs, calibrations et historique sont conservés.
+
+Les nouveaux champs V4 (tags, catégorie, verrouillage, records, carrières, échantillons de calibration) reçoivent des valeurs par défaut.
+
+Avant une mise à jour importante, il reste recommandé d’utiliser **Exporter logos + Tours** depuis la direction de course.
+
+## Tests
+
+La V4 ajoute un test automatique du moteur CIEDE2000 :
+
+```bash
+npm test
+```
+
+Le test compare l’implémentation à plusieurs valeurs de référence ΔE00 et vérifie le comportement du score Toon Tone.

@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { colorScore } = require('./lib/scoring');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,8 +18,17 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : path.join(__dirname, 'local-data'));
 const DATA_FILE = path.join(DATA_DIR, 'game-state.json');
 const DEFAULT_ROUND_SECONDS = Number(process.env.ROUND_SECONDS || 20);
-const COUNTDOWN_MS = 3000;
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '4.0.0';
+const DEFAULT_SETTINGS = {
+  roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10, autoEndWhenAllAnswered: true,
+  qualifyingRatio: .5, scoreMultiplier: 2, showHex: true, greenEnabled: true, mountainEnabled: true, countdownSeconds: 3
+};
+const PRESETS = {
+  rapide: {label:'Rapide', roundSeconds:12, resultDelaySeconds:6, autoAdvance:true, autoEndWhenAllAnswered:true, qualifyingRatio:.4, scoreMultiplier:2, countdownSeconds:3, showHex:true},
+  soiree: {label:'Soirée', roundSeconds:20, resultDelaySeconds:10, autoAdvance:false, autoEndWhenAllAnswered:true, qualifyingRatio:.5, scoreMultiplier:2, countdownSeconds:3, showHex:true},
+  competitif: {label:'Compétitif', roundSeconds:15, resultDelaySeconds:8, autoAdvance:false, autoEndWhenAllAnswered:true, qualifyingRatio:.6, scoreMultiplier:2.2, countdownSeconds:3, showHex:true},
+  expert: {label:'Expert', roundSeconds:25, resultDelaySeconds:10, autoAdvance:false, autoEndWhenAllAnswered:true, qualifyingRatio:.6, scoreMultiplier:2.5, countdownSeconds:3, showHex:true}
+};
 
 const DIFFICULTY_CATEGORIES = {
   easy:      { key:'easy',      label:'Facile',         emoji:'🟢', points:2 },
@@ -29,6 +39,8 @@ const DIFFICULTY_CATEGORIES = {
 };
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
+let STORAGE_WRITABLE = true;
+try { const probe=path.join(DATA_DIR,'.ttt-write-test'); fs.writeFileSync(probe,'ok'); fs.unlinkSync(probe); } catch { STORAGE_WRITABLE=false; }
 app.use(express.json({ limit: '6mb' }));
 app.get('/version', (_, res) => res.json({
   version: APP_VERSION,
@@ -47,7 +59,9 @@ app.get('/version', (_, res) => res.json({
   autoEndWhenAllAnswered: true,
   randomTourOrder: true,
   incidentControls: true,
-  quickPreparation: true
+  quickPreparation: true,
+  visualOverhaul: true, advancedLogoLibrary: true, quickGameWizard: true, persistentRecords: true,
+  calibrationV2: true, crashRecovery: true, gameplayPresets: true, systemStatus: true
 }));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -65,6 +79,7 @@ function roomCode() {
   return Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 function sanitizeName(name, max = 40) { return String(name || '').trim().slice(0, max).replace(/[<>]/g, ''); }
+function sanitizeTags(input){const raw=Array.isArray(input)?input:String(input||'').split(',');return [...new Set(raw.map(x=>sanitizeName(x,24).toLocaleLowerCase('fr-FR')).filter(Boolean))].slice(0,12);}
 function clamp(n, min, max) { return Math.max(min, Math.min(max, Number(n) || 0)); }
 
 function defaultState() {
@@ -78,7 +93,9 @@ function defaultState() {
     lastTourSummary: null,
     tourHistory: [],
     roundHistory: [],
-    settings: { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10, autoEndWhenAllAnswered: true },
+    settings: { ...DEFAULT_SETTINGS },
+    records: { games:0, updatedAt:null, bestProximity:null, fastest90:null, lowestProximity:null, bestGameAverage:null, mountainGame:null },
+    career: {}, adminLog: [], lastCheckpoint: null, recoverySession: null, lastSavedAt: null,
     createdAt: Date.now()
   };
 }
@@ -114,7 +131,12 @@ function normalizeLogo(l) {
     calibrationRounds: Number(l?.calibrationRounds) || 0,
     calibrationAnswers: Number(l?.calibrationAnswers) || 0,
     calibrationProximityTotal: Number(l?.calibrationProximityTotal) || 0,
-    calibrationUpdatedAt: Number(l?.calibrationUpdatedAt) || null
+    calibrationUpdatedAt: Number(l?.calibrationUpdatedAt) || null,
+    calibrationSamples: Array.isArray(l?.calibrationSamples) ? l.calibrationSamples.slice(-16) : [],
+    difficultyLocked: !!l?.difficultyLocked,
+    brandCategory: sanitizeName(l?.brandCategory || 'Autre', 30) || 'Autre',
+    tags: Array.isArray(l?.tags) ? l.tags.map(x=>sanitizeName(x,24)).filter(Boolean).slice(0,12) : [],
+    usageCount: Number(l?.usageCount) || 0
   };
 }
 function normalizeTour(t) {
@@ -133,23 +155,45 @@ function loadState() {
   try {
     if (fs.existsSync(DATA_FILE)) {
       const loaded = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+      const interruptedTour = loaded.activeTour ? JSON.parse(JSON.stringify(loaded.activeTour)) : null;
+      const interruptedRound = loaded.activeRound ? {
+        logoId: loaded.activeRound.logoId, logoName: loaded.activeRound.logoName,
+        tourStageNumber: loaded.activeRound.tourStageNumber, roundNumber: loaded.activeRound.roundNumber,
+        participantIds: loaded.activeRound.participantIds || [], startedAt: loaded.activeRound.startedAt
+      } : null;
+      if (interruptedTour) loaded.recoverySession = {
+        id: uid('recovery_'), createdAt: Date.now(), reason: 'server_restart',
+        activeTour: interruptedTour, interruptedRound
+      };
       loaded.activeRound = null;
-      loaded.activeTour = null; // un déploiement ne reprend jamais un chrono/tour en cours
-      loaded.settings ||= { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10, autoEndWhenAllAnswered: true };
-      loaded.settings.resultDelaySeconds = clamp(loaded.settings.resultDelaySeconds || 10, 5, 30);
+      loaded.activeTour = null;
+      loaded.settings = { ...DEFAULT_SETTINGS, ...(loaded.settings || {}) };
+      loaded.settings.roundSeconds = clamp(loaded.settings.roundSeconds || DEFAULT_ROUND_SECONDS, 5, 120);
+      loaded.settings.resultDelaySeconds = clamp(loaded.settings.resultDelaySeconds || 10, 3, 30);
       loaded.settings.autoEndWhenAllAnswered = loaded.settings.autoEndWhenAllAnswered !== false;
+      loaded.settings.qualifyingRatio = clamp(loaded.settings.qualifyingRatio || .5, .25, 1);
+      loaded.settings.scoreMultiplier = clamp(loaded.settings.scoreMultiplier || 2, .5, 5);
+      loaded.settings.countdownSeconds = clamp(loaded.settings.countdownSeconds || 3, 1, 5);
+      loaded.settings.showHex = loaded.settings.showHex !== false;
+      loaded.settings.greenEnabled = loaded.settings.greenEnabled !== false;
+      loaded.settings.mountainEnabled = loaded.settings.mountainEnabled !== false;
       loaded.logos = (loaded.logos || []).map(normalizeLogo);
       loaded.tours = (loaded.tours || []).map(normalizeTour);
       loaded.roundHistory ||= [];
       loaded.players ||= {};
       loaded.lastTourSummary ||= null;
-      loaded.tourHistory = Array.isArray(loaded.tourHistory) ? loaded.tourHistory.slice(-50) : [];
+      loaded.tourHistory = Array.isArray(loaded.tourHistory) ? loaded.tourHistory.slice(-100) : [];
+      loaded.records ||= { games:0, updatedAt:null, bestProximity:null, fastest90:null, lowestProximity:null, bestGameAverage:null, mountainGame:null };
+      loaded.career = loaded.career && typeof loaded.career === 'object' ? loaded.career : {};
+      loaded.adminLog = Array.isArray(loaded.adminLog) ? loaded.adminLog.slice(-120) : [];
+      loaded.lastCheckpoint ||= null;
       const totalDuration = loaded.roundHistory.reduce((sum, h) => sum + historyDurationMs(h, loaded.settings), 0);
       Object.values(loaded.players).forEach(p => {
         p.yellowTotal = Number(p.yellowTotal) || 0;
         p.yellowCount = Number(p.yellowCount) || 0;
         p.greenTime = Number(p.greenTime) || 0;
         p.mountainPoints = Number(p.mountainPoints) || 0;
+        p.online = false;
         p.participatedDurationMs = Number.isFinite(Number(p.participatedDurationMs))
           ? Number(p.participatedDurationMs) || 0
           : Math.min(totalDuration, p.yellowCount * (Number(loaded.settings.roundSeconds) || DEFAULT_ROUND_SECONDS) * 1000);
@@ -166,10 +210,51 @@ let autoTimer = null;
 let completionTimer = null;
 
 function saveState() {
+  state.lastSavedAt = Date.now();
   const tmp = DATA_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
   fs.renameSync(tmp, DATA_FILE);
 }
+function logAdmin(type, detail={}) {
+  state.adminLog ||= [];
+  state.adminLog.push({ id:uid('log_'), at:Date.now(), type, detail });
+  state.adminLog = state.adminLog.slice(-120);
+}
+function scoreSnapshot() {
+  return Object.fromEntries(Object.values(state.players).map(p=>[p.id,{
+    yellowTotal:Number(p.yellowTotal)||0,yellowCount:Number(p.yellowCount)||0,greenTime:Number(p.greenTime)||0,
+    participatedDurationMs:Number(p.participatedDurationMs)||0,mountainPoints:Number(p.mountainPoints)||0,lastAnswer:p.lastAnswer||null
+  }]));
+}
+function createCheckpoint(label='Avant étape') {
+  state.lastCheckpoint={
+    id:uid('checkpoint_'),createdAt:Date.now(),label,
+    players:scoreSnapshot(),roundHistory:JSON.parse(JSON.stringify(state.roundHistory)),
+    activeTour:state.activeTour?JSON.parse(JSON.stringify(state.activeTour)):null,
+    calibration:state.logos.map(l=>({id:l.id,calibrationRounds:l.calibrationRounds||0,calibrationAnswers:l.calibrationAnswers||0,calibrationProximityTotal:l.calibrationProximityTotal||0,calibrationUpdatedAt:l.calibrationUpdatedAt||null,calibrationSamples:l.calibrationSamples||[],usageCount:l.usageCount||0}))
+  };
+}
+function restoreCheckpoint() {
+  const cp=state.lastCheckpoint;if(!cp)return {ok:false,error:'Aucun point de restauration disponible.'};
+  if(state.activeRound)return {ok:false,error:'Annule ou termine l’étape en cours avant de restaurer.'};
+  for(const p of Object.values(state.players)){
+    const old=cp.players?.[p.id]||{};
+    p.yellowTotal=Number(old.yellowTotal)||0;p.yellowCount=Number(old.yellowCount)||0;p.greenTime=Number(old.greenTime)||0;
+    p.participatedDurationMs=Number(old.participatedDurationMs)||0;p.mountainPoints=Number(old.mountainPoints)||0;p.lastAnswer=old.lastAnswer||null;
+  }
+  state.roundHistory=JSON.parse(JSON.stringify(cp.roundHistory||[]));
+  state.activeTour=cp.activeTour?JSON.parse(JSON.stringify(cp.activeTour)):null;
+  for(const snap of cp.calibration||[]){const l=state.logos.find(x=>x.id===snap.id);if(!l)continue;Object.assign(l,snap);}
+  state.lastTourSummary=null;logAdmin('checkpoint_restored',{checkpointId:cp.id,label:cp.label});saveState();emitState();return {ok:true};
+}
+function publicRecords(){return JSON.parse(JSON.stringify(state.records||{}));}
+function systemStatus(){
+  const secure=state.logos.filter(hasSecureAssets).length;
+  return {version:APP_VERSION,storageWritable:STORAGE_WRITABLE,persistentVolume:path.resolve(DATA_DIR)==='/data',dataDir:DATA_DIR,lastSavedAt:state.lastSavedAt||null,
+    logos:state.logos.length,secureLogos:secure,tours:state.tours.length,historyGames:state.tourHistory.length,
+    recoveryAvailable:!!state.recoverySession,checkpointAvailable:!!state.lastCheckpoint,adminLogEntries:(state.adminLog||[]).length};
+}
+
 function clearTimers() {
   if (roundTimer) clearTimeout(roundTimer);
   if (autoTimer) clearTimeout(autoTimer);
@@ -183,7 +268,8 @@ function totalCompletedDurationMs() {
 }
 function publicPlayer(p) {
   const totalRounds = state.roundHistory.length;
-  const minRounds = totalRounds ? Math.ceil(totalRounds * 0.5) : 0;
+  const qualifyingRatio = clamp(state.activeTour?.qualifyingRatio ?? state.settings.qualifyingRatio ?? .5, .25, 1);
+  const minRounds = totalRounds ? Math.ceil(totalRounds * qualifyingRatio) : 0;
   const playedRounds = Number(p.yellowCount) || 0;
   const qualified = totalRounds === 0 || playedRounds >= minRounds;
   const totalDuration = totalCompletedDurationMs();
@@ -221,7 +307,8 @@ function activeTourPublic() {
     currentIndex:t.currentIndex, completedStages:t.completedStages || 0,
     totalStages:t.logoIds.length, autoAdvance:!!t.autoAdvance,
     randomOrder:!!t.randomOrder, autoEndWhenAllAnswered:t.autoEndWhenAllAnswered!==false,
-    resultDelaySeconds:t.resultDelaySeconds, roundSeconds:t.roundSeconds,
+    resultDelaySeconds:t.resultDelaySeconds, roundSeconds:t.roundSeconds, qualifyingRatio:t.qualifyingRatio, scoreMultiplier:t.scoreMultiplier, showHex:t.showHex!==false,
+    greenEnabled:t.greenEnabled!==false, mountainEnabled:t.mountainEnabled!==false, countdownSeconds:t.countdownSeconds||3, presetKey:t.presetKey||null,
     skippedStages:Array.isArray(t.skippedStages)?t.skippedStages:[],
     startedAt:t.startedAt, nextLogoId, nextLogoName:nextLogo?.name || null
   };
@@ -257,7 +344,8 @@ function basicSnapshot() {
       pauseRemainingMs: state.activeRound.pauseRemainingMs ?? null,
       autoEndWhenAllAnswered: state.activeRound.autoEndWhenAllAnswered !== false,
       startedAt: state.activeRound.startedAt, endsAt: state.activeRound.endsAt,
-      durationSeconds: state.activeRound.durationSeconds,
+      durationSeconds: state.activeRound.durationSeconds, countdownSeconds:state.activeRound.countdownSeconds||3, scoreMultiplier:state.activeRound.scoreMultiplier||2,
+      showHex:state.activeRound.showHex!==false, greenEnabled:state.activeRound.greenEnabled!==false, mountainEnabled:state.activeRound.mountainEnabled!==false,
       answerCount: Object.keys(state.activeRound.answers || {}).length
     } : null,
     settings: state.settings
@@ -269,7 +357,10 @@ function adminSnapshot() {
     logos: state.logos.map(l => ({ ...l, calibration: calibrationForLogo(l), secureReady: hasSecureAssets(l) })),
     tours: state.tours.map(publicTour),
     roundHistory: state.roundHistory.slice(-50).reverse(),
-    tourHistory: state.tourHistory.slice(-50).reverse()
+    tourHistory: state.tourHistory.slice(-100).reverse(),
+    records: publicRecords(), career: Object.values(state.career||{}).sort((a,b)=>(b.tourWins||0)-(a.tourWins||0)||(b.games||0)-(a.games||0)).slice(0,50),
+    recoverySession: state.recoverySession, lastCheckpoint: state.lastCheckpoint?{id:state.lastCheckpoint.id,createdAt:state.lastCheckpoint.createdAt,label:state.lastCheckpoint.label}:null,
+    adminLog: (state.adminLog||[]).slice(-30).reverse(), systemStatus:systemStatus(), presets:PRESETS
   };
 }
 function emitState() {
@@ -277,48 +368,6 @@ function emitState() {
   io.to('admins').emit('admin-state', adminSnapshot());
 }
 
-function hexToRgb(hex) {
-  const h = String(hex).replace('#', '');
-  if (!/^[0-9a-fA-F]{6}$/.test(h)) return null;
-  return { r: parseInt(h.slice(0,2),16), g: parseInt(h.slice(2,4),16), b: parseInt(h.slice(4,6),16) };
-}
-function rgbToLab({r,g,b}) {
-  let R = r/255, G = g/255, B = b/255;
-  R = R > .04045 ? Math.pow((R+.055)/1.055,2.4) : R/12.92;
-  G = G > .04045 ? Math.pow((G+.055)/1.055,2.4) : G/12.92;
-  B = B > .04045 ? Math.pow((B+.055)/1.055,2.4) : B/12.92;
-  let x=(R*.4124+G*.3576+B*.1805)/.95047, y=(R*.2126+G*.7152+B*.0722), z=(R*.0193+G*.1192+B*.9505)/1.08883;
-  const f=v=>v>.008856?Math.pow(v,1/3):(7.787*v)+16/116;
-  x=f(x);y=f(y);z=f(z);
-  return {L:116*y-16,a:500*(x-y),b:200*(y-z)};
-}
-function deg2rad(d){return d*Math.PI/180;}
-function rad2deg(r){return r*180/Math.PI;}
-function deltaE2000(lab1,lab2){
-  const L1=lab1.L,a1=lab1.a,b1=lab1.b,L2=lab2.L,a2=lab2.a,b2=lab2.b;
-  const C1=Math.sqrt(a1*a1+b1*b1),C2=Math.sqrt(a2*a2+b2*b2),Cbar=(C1+C2)/2;
-  const G=.5*(1-Math.sqrt(Math.pow(Cbar,7)/(Math.pow(Cbar,7)+Math.pow(25,7))));
-  const ap1=(1+G)*a1,ap2=(1+G)*a2,Cp1=Math.sqrt(ap1*ap1+b1*b1),Cp2=Math.sqrt(ap2*ap2+b2*b2);
-  let hp1=rad2deg(Math.atan2(b1,ap1));if(hp1<0)hp1+=360;let hp2=rad2deg(Math.atan2(b2,ap2));if(hp2<0)hp2+=360;
-  const dLp=L2-L1,dCp=Cp2-Cp1;let dhp=0;
-  if(Cp1*Cp2!==0){dhp=hp2-hp1;if(dhp>180)dhp-=360;else if(dhp<-180)dhp+=360;}
-  const dHp=2*Math.sqrt(Cp1*Cp2)*Math.sin(deg2rad(dhp/2));
-  const Lbar=(L1+L2)/2,Cpbar=(Cp1+Cp2)/2;let hpbar=hp1+hp2;
-  if(Cp1*Cp2===0)hpbar=hp1+hp2;else if(Math.abs(hp1-hp2)<=180)hpbar=(hp1+hp2)/2;else if(hp1+hp2<360)hpbar=(hp1+hp2+360)/2;else hpbar=(hp1+hp2-360)/2;
-  const T=1-.17*Math.cos(deg2rad(hpbar-30))+.24*Math.cos(deg2rad(2*hpbar))+.32*Math.cos(deg2rad(3*hpbar+6))-.20*Math.cos(deg2rad(4*hpbar-63));
-  const dTheta=30*Math.exp(-Math.pow((hpbar-275)/25,2));
-  const Rc=2*Math.sqrt(Math.pow(Cpbar,7)/(Math.pow(Cpbar,7)+Math.pow(25,7)));
-  const Sl=1+(.015*Math.pow(Lbar-50,2))/Math.sqrt(20+Math.pow(Lbar-50,2)),Sc=1+.045*Cpbar,Sh=1+.015*Cpbar*T;
-  const Rt=-Math.sin(deg2rad(2*dTheta))*Rc;
-  const x=dLp/Sl,y=dCp/Sc,z=dHp/Sh;
-  return Math.sqrt(x*x+y*y+z*z+Rt*y*z);
-}
-function colorScore(aHex,bHex) {
-  const a=hexToRgb(aHex),b=hexToRgb(bHex);if(!a||!b)return {proximity:0,deltaE00:100};
-  const dE=deltaE2000(rgbToLab(a),rgbToLab(b));
-  return {proximity:Math.max(0,Math.min(100,100-2*dE)),deltaE00:dE};
-}
-function proximityPct(aHex,bHex){return colorScore(aHex,bHex).proximity;}
 function isValidDataImage(src) {
   return typeof src === 'string' && /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,/.test(src) && src.length < 3_000_000;
 }
@@ -327,14 +376,24 @@ function hasSecureAssets(logo){
 }
 function calibrationCategory(avg){if(avg>=90)return 'easy';if(avg>=82)return 'medium';if(avg>=72)return 'hard';if(avg>=62)return 'very_hard';return 'hc';}
 function calibrationForLogo(logo){
-  const answers=Number(logo?.calibrationAnswers)||0,rounds=Number(logo?.calibrationRounds)||0,avg=answers?(Number(logo.calibrationProximityTotal)||0)/answers:0;
-  const suggestedCategory=answers>=10?calibrationCategory(avg):null;
-  const confidence=answers<10?'insufficient':answers<30?'emerging':answers<60?'reliable':'strong';
-  return {rounds,answers,averageProximity:avg,suggestedCategory,confidence,eligible:answers>=10,currentCategory:logo?.difficultyCategory||'medium',changed:!!suggestedCategory&&suggestedCategory!==logo?.difficultyCategory};
+  const answers=Number(logo?.calibrationAnswers)||0,rounds=Number(logo?.calibrationRounds)||0;
+  const observedAvg=answers?(Number(logo.calibrationProximityTotal)||0)/answers:0;
+  const priorWeight=12,priorAverage=78;
+  const adjustedAverage=answers?((Number(logo.calibrationProximityTotal)||0)+priorWeight*priorAverage)/(answers+priorWeight):priorAverage;
+  const eligible=answers>=15;
+  const suggestedCategory=eligible?calibrationCategory(adjustedAverage):null;
+  const confidence=answers<15?'insufficient':answers<35?'emerging':answers<70?'reliable':answers<120?'strong':'very_strong';
+  const samples=Array.isArray(logo?.calibrationSamples)?logo.calibrationSamples:[];
+  let trend=0;if(samples.length>=4){const recent=samples.slice(-3),prev=samples.slice(-6,-3);const avg=a=>a.reduce((x,y)=>x+(Number(y.average)||0),0)/Math.max(1,a.length);trend=avg(recent)-avg(prev);}
+  return {rounds,answers,averageProximity:observedAvg,adjustedAverage,suggestedCategory,confidence,eligible,currentCategory:logo?.difficultyCategory||'medium',changed:!!suggestedCategory&&suggestedCategory!==logo?.difficultyCategory,locked:!!logo?.difficultyLocked,trend};
 }
 function updateCalibration(logo,results){
   const answered=(results||[]).filter(r=>r.color);if(!answered.length)return;
-  logo.calibrationRounds=(Number(logo.calibrationRounds)||0)+1;logo.calibrationAnswers=(Number(logo.calibrationAnswers)||0)+answered.length;logo.calibrationProximityTotal=(Number(logo.calibrationProximityTotal)||0)+answered.reduce((sum,r)=>sum+(Number(r.proximity)||0),0);logo.calibrationUpdatedAt=Date.now();
+  // L'étalonnage reste comparable entre les presets : on normalise toujours avec le coefficient de référence ×2.
+  const canonical=answered.map(r=>r.deltaE00===null||r.deltaE00===undefined?(Number(r.proximity)||0):Math.max(0,Math.min(100,100-2*Number(r.deltaE00))));
+  const roundAverage=canonical.reduce((a,b)=>a+b,0)/canonical.length;
+  logo.calibrationRounds=(Number(logo.calibrationRounds)||0)+1;logo.calibrationAnswers=(Number(logo.calibrationAnswers)||0)+answered.length;logo.calibrationProximityTotal=(Number(logo.calibrationProximityTotal)||0)+canonical.reduce((a,b)=>a+b,0);logo.calibrationUpdatedAt=Date.now();
+  logo.calibrationSamples=Array.isArray(logo.calibrationSamples)?logo.calibrationSamples:[];logo.calibrationSamples.push({at:Date.now(),average:Number(roundAverage.toFixed(2)),answers:answered.length});logo.calibrationSamples=logo.calibrationSamples.slice(-16);
 }
 function areaDifficultyScore(ratio) {
   const r=clamp(ratio,0,1); if(r>.40)return 0;if(r>.15)return 1;if(r>.05)return 2;return 3;
@@ -371,6 +430,12 @@ function shuffleArray(items) {
   const a=[...items];
   for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
   return a;
+}
+function quickLogoIds(count=10,mode='balanced') {
+  const available=state.logos.filter(hasSecureAssets),n=Math.max(1,Math.min(Number(count)||10,available.length));
+  if(mode!=='balanced')return shuffleArray(available).slice(0,n).map(l=>l.id);
+  const keys=['easy','medium','hard','very_hard','hc'];const groups=Object.fromEntries(keys.map(k=>[k,shuffleArray(available.filter(l=>l.difficultyCategory===k))]));const out=[];
+  while(out.length<n){let added=false;for(const k of keys){if(out.length>=n)break;const l=groups[k].shift();if(l){out.push(l.id);added=true;}}if(!added)break;}return shuffleArray(out);
 }
 function emitToPlayer(playerId,event,payload={}) {
   for(const s of io.sockets.sockets.values()) if(s.data.playerId===playerId) s.emit(event,payload);
@@ -429,9 +494,10 @@ function resetScoresOnly() {
 function startRoundInternal(logoId,durationSeconds,meta={}) {
   if(state.activeRound) return {ok:false,error:'Une manche est déjà en cours.'};
   const logo=state.logos.find(l=>l.id===logoId); if(!logo)return {ok:false,error:'Logo introuvable.'};
-  if(!hasSecureAssets(logo))return {ok:false,error:'Ce logo doit être sécurisé avant de jouer. Laisse la page admin ouverte quelques secondes : la V3.3 le prépare automatiquement.'};
+  if(!hasSecureAssets(logo))return {ok:false,error:'Ce logo doit être sécurisé avant de jouer. Laisse la page admin ouverte quelques secondes : la V4 le prépare automatiquement.'};
   const seconds=clamp(durationSeconds||state.settings.roundSeconds||20,5,120);
-  const now=Date.now(), startedAt=now+COUNTDOWN_MS;
+  const countdownSeconds=clamp(meta.countdownSeconds ?? state.activeTour?.countdownSeconds ?? state.settings.countdownSeconds ?? 3,1,5);
+  const now=Date.now(), startedAt=now+countdownSeconds*1000;
   const participantIds=Object.values(state.players).filter(p=>p.online).map(p=>p.id);
   state.activeRound={
     id:uid('r_'),logoId:logo.id,logoName:logo.name,playImage:logo.playImage,maskBits:logo.maskBits,maskWidth:logo.maskWidth,maskHeight:logo.maskHeight,targetColor:logo.targetColor,
@@ -439,7 +505,9 @@ function startRoundInternal(logoId,durationSeconds,meta={}) {
     roundNumber:meta.roundNumber||state.roundHistory.length+1,
     tourSessionId:meta.tourSessionId||null,tourId:meta.tourId||null,tourName:meta.tourName||null,tourStageNumber:meta.tourStageNumber||null,tourStageCount:meta.tourStageCount||null,
     participantIds,durationSeconds:seconds,createdAt:now,startedAt,endsAt:startedAt+seconds*1000,answers:{},
-    paused:false,pausedAt:null,pauseRemainingMs:null,totalPausedMs:0,
+    paused:false,pausedAt:null,pauseRemainingMs:null,totalPausedMs:0,countdownSeconds,
+    scoreMultiplier:clamp(meta.scoreMultiplier ?? state.activeTour?.scoreMultiplier ?? state.settings.scoreMultiplier ?? 2,.5,5),
+    showHex:meta.showHex ?? state.activeTour?.showHex ?? state.settings.showHex,greenEnabled:meta.greenEnabled ?? state.activeTour?.greenEnabled ?? state.settings.greenEnabled,mountainEnabled:meta.mountainEnabled ?? state.activeTour?.mountainEnabled ?? state.settings.mountainEnabled,
     autoEndWhenAllAnswered:meta.autoEndWhenAllAnswered!==undefined?!!meta.autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false
   };
   saveState();emitState();
@@ -447,8 +515,8 @@ function startRoundInternal(logoId,durationSeconds,meta={}) {
   return {ok:true,participantCount:participantIds.length};
 }
 
-function aggregateTourStandings(rounds) {
-  const totalRounds=rounds.length, minRounds=totalRounds?Math.ceil(totalRounds*.5):0;
+function aggregateTourStandings(rounds, qualifyingRatio=.5) {
+  const totalRounds=rounds.length, minRounds=totalRounds?Math.ceil(totalRounds*clamp(qualifyingRatio,.25,1)):0;
   const rows=new Map();
   const ensure=(id,name)=>{if(!rows.has(id))rows.set(id,{id,name,yellowTotal:0,yellowCount:0,greenTime:0,participatedDurationMs:0,mountainPoints:0,podiums:0,wins:0});return rows.get(id);};
   Object.values(state.players).forEach(p=>ensure(p.id,p.name));
@@ -499,7 +567,7 @@ function median(values) {
 }
 function buildTourSummary(activeTour, reason='finished') {
   const rounds=state.roundHistory.filter(h=>h.tourSessionId===activeTour.sessionId);
-  const s=aggregateTourStandings(rounds);
+  const s=aggregateTourStandings(rounds,activeTour.qualifyingRatio??.5);
   const answered=rounds.flatMap(h=>h.results.filter(r=>r.color));
   const allResults=rounds.flatMap(h=>h.results||[]);
   const totalOpportunities=allResults.length;
@@ -546,7 +614,8 @@ function buildTourSummary(activeTour, reason='finished') {
     id:uid('summary_'),sessionId:activeTour.sessionId,tourId:activeTour.tourId,name:activeTour.name,reason,endedAt:Date.now(),
     completedStages:rounds.length+(activeTour.skippedStages?.length||0),scoredStages:rounds.length,processedStages:rounds.length+(activeTour.skippedStages?.length||0),totalStages:activeTour.logoIds.length,
     skippedStages:activeTour.skippedStages||[],incidents:activeTour.incidents||[],randomOrder:!!activeTour.randomOrder,
-    scoringModel:'CIEDE2000',scoreFormula:'max(0, 100 - 2 × ΔE00)',
+    gameplay:{qualifyingRatio:activeTour.qualifyingRatio??.5,showHex:activeTour.showHex!==false,greenEnabled:activeTour.greenEnabled!==false,mountainEnabled:activeTour.mountainEnabled!==false,countdownSeconds:activeTour.countdownSeconds||3,presetKey:activeTour.presetKey||null},
+    scoringModel:'CIEDE2000',scoreMultiplier:activeTour.scoreMultiplier||2,scoreFormula:`max(0, 100 - ${(activeTour.scoreMultiplier||2).toFixed(1)} × ΔE00)`,
     standings:s,awards:buildAwards(rounds,s),playerStats,stages,
     stats:{
       players:new Set(allResults.map(r=>r.playerId)).size,skippedStages:activeTour.skippedStages?.length||0,
@@ -561,11 +630,31 @@ function buildTourSummary(activeTour, reason='finished') {
     }
   };
 }
+function updatePersistentRecords(summary){
+  state.records ||= {games:0};state.records.games=(Number(state.records.games)||0)+1;state.records.updatedAt=Date.now();
+  const breaks=[];const allAnswers=(summary.stages||[]).flatMap(st=>(st.results||[]).filter(r=>r.color).map(r=>({...r,logoName:st.logoName})));
+  const best=[...allAnswers].sort((a,b)=>b.proximity-a.proximity||a.elapsedMs-b.elapsedMs)[0];
+  if(best&&(!state.records.bestProximity||best.proximity>state.records.bestProximity.value)){state.records.bestProximity={value:best.proximity,name:best.name,logoName:best.logoName,at:Date.now()};breaks.push({emoji:'🎯',title:'Record de précision',detail:`${best.name} · ${best.proximity.toFixed(1)} % · ${best.logoName}`});}
+  const fast=[...allAnswers].filter(r=>r.proximity>=90).sort((a,b)=>a.elapsedMs-b.elapsedMs||b.proximity-a.proximity)[0];
+  if(fast&&(!state.records.fastest90||fast.elapsedMs<state.records.fastest90.valueMs)){state.records.fastest90={valueMs:fast.elapsedMs,name:fast.name,proximity:fast.proximity,logoName:fast.logoName,at:Date.now()};breaks.push({emoji:'⚡',title:'Record de vitesse ≥ 90 %',detail:`${fast.name} · ${(fast.elapsedMs/1000).toFixed(1)} s · ${fast.logoName}`});}
+  const low=[...allAnswers].sort((a,b)=>a.proximity-b.proximity)[0];
+  if(low&&(!state.records.lowestProximity||low.proximity<state.records.lowestProximity.value)){state.records.lowestProximity={value:low.proximity,name:low.name,logoName:low.logoName,at:Date.now()};breaks.push({emoji:'💥',title:'Record du grand écart',detail:`${low.name} · ${low.proximity.toFixed(1)} % · ${low.logoName}`});}
+  const bestGame=[...(summary.playerStats||[])].filter(p=>p.answers).sort((a,b)=>b.averageProximity-a.averageProximity)[0];
+  if(bestGame&&(!state.records.bestGameAverage||bestGame.averageProximity>state.records.bestGameAverage.value)){state.records.bestGameAverage={value:bestGame.averageProximity,name:bestGame.name,tourName:summary.name,at:Date.now()};breaks.push({emoji:'🏆',title:'Record de moyenne',detail:`${bestGame.name} · ${bestGame.averageProximity.toFixed(1)} % · ${summary.name}`});}
+  const mountain=summary.standings?.polka?.[0];
+  if(mountain&&(!state.records.mountainGame||mountain.mountainPoints>state.records.mountainGame.value)){state.records.mountainGame={value:mountain.mountainPoints,name:mountain.name,tourName:summary.name,at:Date.now()};breaks.push({emoji:'🏔️',title:'Record montagne',detail:`${mountain.name} · ${mountain.mountainPoints} pts · ${summary.name}`});}
+  const yellowWinner=summary.standings?.yellow?.find(p=>p.qualified)||summary.standings?.yellow?.[0];
+  for(const ps of summary.playerStats||[]){const key=String(ps.name||'').trim().toLocaleLowerCase('fr-FR');if(!key)continue;const c=state.career[key]||{name:ps.name,games:0,tourWins:0,stageWins:0,podiums:0,totalAverage:0,bestAverage:0,mountainPoints:0};c.name=ps.name;c.games++;c.stageWins+=(ps.wins||0);c.podiums+=(ps.podiums||0);c.totalAverage+=Number(ps.averageProximity)||0;c.bestAverage=Math.max(c.bestAverage||0,Number(ps.averageProximity)||0);c.mountainPoints+=(ps.mountainPoints||0);if(yellowWinner?.name===ps.name)c.tourWins++;c.averageAcrossGames=c.games?c.totalAverage/c.games:0;state.career[key]=c;}
+  summary.recordBreaks=breaks;summary.globalRecords=publicRecords();summary.careerLeaders=Object.values(state.career).sort((a,b)=>(b.tourWins||0)-(a.tourWins||0)||(b.bestAverage||0)-(a.bestAverage||0)).slice(0,10);
+  return breaks;
+}
+
 function finalizeTour(reason='finished') {
   if(!state.activeTour)return null;
   if(state.activeRound)return null;
   if(autoTimer)clearTimeout(autoTimer);autoTimer=null;
   const summary=buildTourSummary(state.activeTour,reason);
+  updatePersistentRecords(summary);logAdmin('tour_finished',{name:summary.name,reason,stages:summary.scoredStages});
   state.lastTourSummary=summary;state.tourHistory.push(summary);state.tourHistory=state.tourHistory.slice(-50);state.activeTour=null;saveState();
   io.emit('tour-ended',summary);emitState();return summary;
 }
@@ -573,9 +662,10 @@ function launchCurrentTourStage() {
   const t=state.activeTour;if(!t||state.activeRound)return {ok:false,error:'Tour indisponible.'};
   if(t.currentIndex>=t.logoIds.length){finalizeTour('finished');return {ok:true,finished:true};}
   const logoId=t.logoIds[t.currentIndex];
+  createCheckpoint(`Avant étape ${t.currentIndex+1} · ${state.logos.find(l=>l.id===logoId)?.name||''}`);
   const res=startRoundInternal(logoId,t.roundSeconds,{
     roundNumber:t.currentIndex+1,tourSessionId:t.sessionId,tourId:t.tourId,tourName:t.name,tourStageNumber:t.currentIndex+1,tourStageCount:t.logoIds.length,
-    autoEndWhenAllAnswered:t.autoEndWhenAllAnswered!==false
+    autoEndWhenAllAnswered:t.autoEndWhenAllAnswered!==false,countdownSeconds:t.countdownSeconds,scoreMultiplier:t.scoreMultiplier,showHex:t.showHex,greenEnabled:t.greenEnabled,mountainEnabled:t.mountainEnabled
   });
   if(!res.ok){t.currentIndex++;saveState();return launchCurrentTourStage();}
   return res;
@@ -596,17 +686,17 @@ function endRound(reason='timer') {
   const durationMs=round.durationSeconds*1000, participantIds=round.participantIds||[];
   const results=participantIds.map(playerId=>{
     const player=state.players[playerId];if(!player)return null;
-    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,Number(answer.elapsedMs ?? (answer.at-round.startedAt-(round.totalPausedMs||0))))):durationMs;const score=answer?colorScore(answer.color,logo.targetColor):{proximity:0,deltaE00:null};
+    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,Number(answer.elapsedMs ?? (answer.at-round.startedAt-(round.totalPausedMs||0))))):durationMs;const score=answer?colorScore(answer.color,logo.targetColor,round.scoreMultiplier||2):{proximity:0,deltaE00:null};
     return {playerId:player.id,name:player.name,color:answer?.color||null,proximity:score.proximity,deltaE00:score.deltaE00,elapsedMs,mountainGain:0};
   }).filter(Boolean).sort((a,b)=>b.proximity-a.proximity||a.elapsedMs-b.elapsedMs);
   results.forEach((r,idx)=>{r.roundRank=idx+1;const p=state.players[r.playerId];if(!p)return;p.yellowTotal=(p.yellowTotal||0)+r.proximity;p.yellowCount=(p.yellowCount||0)+1;p.greenTime=(p.greenTime||0)+r.elapsedMs;p.participatedDurationMs=(p.participatedDurationMs||0)+durationMs;p.lastAnswer={proximity:r.proximity,elapsedMs:r.elapsedMs,color:r.color,roundId:round.id};});
   const eligible=results.filter(r=>r.color),factors=[1,.75,.5,.3,.15];
-  eligible.slice(0,5).forEach((r,idx)=>{const gain=Math.max(1,Math.round(logo.difficultyPoints*factors[idx]));r.mountainGain=gain;const p=state.players[r.playerId];if(p)p.mountainPoints=(p.mountainPoints||0)+gain;});
-  updateCalibration(logo,results);
+  if(round.mountainEnabled!==false) eligible.slice(0,5).forEach((r,idx)=>{const gain=Math.max(1,Math.round(logo.difficultyPoints*factors[idx]));r.mountainGain=gain;const p=state.players[r.playerId];if(p)p.mountainPoints=(p.mountainPoints||0)+gain;});
+  updateCalibration(logo,results);logo.usageCount=(Number(logo.usageCount)||0)+1;
   const historyItem={
     id:round.id,logoId:logo.id,logoName:logo.name,targetColor:logo.targetColor,colorTolerance:logo.colorTolerance||42,
     difficultyCategory:logo.difficultyCategory,difficultyLabel:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.label||'Moyen',difficultyEmoji:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.emoji||'🔵',difficultyPoints:logo.difficultyPoints,difficultyScore:logo.difficultyScore,
-    roundNumber:round.roundNumber,durationMs,participantCount:participantIds.length,endedAt:Date.now(),reason,
+    roundNumber:round.roundNumber,durationMs,participantCount:participantIds.length,scoreMultiplier:round.scoreMultiplier||2,showHex:round.showHex!==false,greenEnabled:round.greenEnabled!==false,mountainEnabled:round.mountainEnabled!==false,endedAt:Date.now(),reason,
     tourSessionId:round.tourSessionId||null,tourId:round.tourId||null,tourName:round.tourName||null,tourStageNumber:round.tourStageNumber||null,tourStageCount:round.tourStageCount||null,
     results:results.map(r=>({...r,proximity:Number(r.proximity.toFixed(1)),deltaE00:r.deltaE00===null?null:Number(r.deltaE00.toFixed(3))}))
   };
@@ -648,27 +738,29 @@ io.on('connection', socket=>{
     Object.assign(logo,{playImage,maskBits,maskWidth:Number(maskWidth),maskHeight:Number(maskHeight),secureAssetsVersion:Number(secureAssetsVersion)||1});saveState();emitState();cb({ok:true});
   });
   socket.on('admin-apply-calibration',({logoId},cb=()=>{})=>{
-    if(!adminOnly(cb))return;const logo=state.logos.find(l=>l.id===logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.suggestedCategory)return cb({ok:false,error:'Pas encore assez de réponses pour étalonner ce logo.'});
+    if(!adminOnly(cb))return;const logo=state.logos.find(l=>l.id===logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});if(logo.difficultyLocked)return cb({ok:false,error:'La difficulté de ce logo est verrouillée.'});const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.suggestedCategory)return cb({ok:false,error:'Pas encore assez de réponses pour étalonner ce logo.'});
     const cat=DIFFICULTY_CATEGORIES[cal.suggestedCategory];logo.difficultyMode=cal.suggestedCategory;logo.difficultyCategory=cal.suggestedCategory;logo.difficultyLabel=cat.label;logo.difficultyEmoji=cat.emoji;logo.difficultyPoints=cat.points;logo.calibrationAppliedAt=Date.now();saveState();emitState();cb({ok:true,category:cal.suggestedCategory});
   });
   socket.on('admin-apply-all-calibrations',(_,cb=()=>{})=>{
-    if(!adminOnly(cb))return;let changed=0;for(const logo of state.logos){const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.changed)continue;const cat=DIFFICULTY_CATEGORIES[cal.suggestedCategory];logo.difficultyMode=cal.suggestedCategory;logo.difficultyCategory=cal.suggestedCategory;logo.difficultyLabel=cat.label;logo.difficultyEmoji=cat.emoji;logo.difficultyPoints=cat.points;logo.calibrationAppliedAt=Date.now();changed++;}saveState();emitState();cb({ok:true,changed});
+    if(!adminOnly(cb))return;let changed=0;for(const logo of state.logos){if(logo.difficultyLocked)continue;const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.changed)continue;const cat=DIFFICULTY_CATEGORIES[cal.suggestedCategory];logo.difficultyMode=cal.suggestedCategory;logo.difficultyCategory=cal.suggestedCategory;logo.difficultyLabel=cat.label;logo.difficultyEmoji=cat.emoji;logo.difficultyPoints=cat.points;logo.calibrationAppliedAt=Date.now();changed++;}saveState();emitState();cb({ok:true,changed});
   });
   socket.on('admin-clear-tour-history',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.tourHistory=[];saveState();emitState();cb({ok:true});});
 
   socket.on('admin-add-logo',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;const name=sanitizeName(payload?.name,40),targetColor=String(payload?.targetColor||'').toUpperCase(),colorTolerance=clamp(payload?.colorTolerance||42,5,90),logoImage=payload?.logoImage;
     if(!name)return cb({ok:false,error:'Nom du logo requis.'});if(!/^#[0-9A-F]{6}$/.test(targetColor))return cb({ok:false,error:'Couleur cible invalide.'});if(!isValidDataImage(logoImage))return cb({ok:false,error:'Image invalide ou trop lourde (max ~2 Mo).'});
-    const diff=computeDifficulty(payload);const secure={playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0};state.logos.push({id:uid('l_'),name,targetColor,colorTolerance,logoImage,createdAt:Date.now(),...secure,...diff});saveState();emitState();cb({ok:true});
+    const diff=computeDifficulty(payload);const secure={playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0};state.logos.push({id:uid('l_'),name,targetColor,colorTolerance,logoImage,createdAt:Date.now(),brandCategory:sanitizeName(payload?.brandCategory||'Autre',30)||'Autre',tags:sanitizeTags(payload?.tags),difficultyLocked:!!payload?.difficultyLocked,...secure,...diff});logAdmin('logo_added',{name});saveState();emitState();cb({ok:true});
   });
   socket.on('admin-update-logo',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound?.logoId===payload?.logoId)return cb({ok:false,error:'Impossible de modifier le logo pendant sa manche.'});const logo=state.logos.find(l=>l.id===payload?.logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});
     const name=sanitizeName(payload?.name,40),targetColor=String(payload?.targetColor||'').toUpperCase(),colorTolerance=clamp(payload?.colorTolerance||42,5,90),logoImage=payload?.logoImage||logo.logoImage;
     if(!name)return cb({ok:false,error:'Nom du logo requis.'});if(!/^#[0-9A-F]{6}$/.test(targetColor))return cb({ok:false,error:'Couleur cible invalide.'});if(!isValidDataImage(logoImage))return cb({ok:false,error:'Image invalide ou trop lourde.'});
-    Object.assign(logo,{name,targetColor,colorTolerance,logoImage,playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0,updatedAt:Date.now(),...computeDifficulty(payload)});saveState();emitState();cb({ok:true});
+    Object.assign(logo,{name,targetColor,colorTolerance,logoImage,brandCategory:sanitizeName(payload?.brandCategory||logo.brandCategory||'Autre',30)||'Autre',tags:sanitizeTags(payload?.tags),difficultyLocked:payload?.difficultyLocked!==undefined?!!payload.difficultyLocked:!!logo.difficultyLocked,playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0,updatedAt:Date.now(),...computeDifficulty(payload)});logAdmin('logo_updated',{name});saveState();emitState();cb({ok:true});
   });
-  socket.on('admin-delete-logo',({logoId},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound?.logoId===logoId)return cb({ok:false,error:'Impossible pendant la manche active.'});state.logos=state.logos.filter(l=>l.id!==logoId);state.tours.forEach(t=>t.logoIds=t.logoIds.filter(id=>id!==logoId));saveState();emitState();cb({ok:true});});
+  socket.on('admin-delete-logo',({logoId},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound?.logoId===logoId)return cb({ok:false,error:'Impossible pendant la manche active.'});const removed=state.logos.find(l=>l.id===logoId);state.logos=state.logos.filter(l=>l.id!==logoId);state.tours.forEach(t=>t.logoIds=t.logoIds.filter(id=>id!==logoId));logAdmin('logo_deleted',{name:removed?.name||logoId});saveState();emitState();cb({ok:true});});
 
+  socket.on('admin-set-logo-lock',({logoId,locked},cb=()=>{})=>{if(!adminOnly(cb))return;const l=state.logos.find(x=>x.id===logoId);if(!l)return cb({ok:false,error:'Logo introuvable.'});l.difficultyLocked=!!locked;saveState();emitState();cb({ok:true});});
+  socket.on('admin-delete-logos',({logoIds},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound)return cb({ok:false,error:'Impossible pendant une étape.'});const ids=new Set(Array.isArray(logoIds)?logoIds:[]);const protectedId=state.activeRound?.logoId;if(protectedId)ids.delete(protectedId);const before=state.logos.length;state.logos=state.logos.filter(l=>!ids.has(l.id));state.tours.forEach(t=>t.logoIds=t.logoIds.filter(id=>!ids.has(id)));const removed=before-state.logos.length;logAdmin('logos_bulk_deleted',{count:removed});saveState();emitState();cb({ok:true,removed});});
   socket.on('admin-save-tour',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeTour)return cb({ok:false,error:'Termine le Tour en cours avant de modifier les parcours.'});
     const name=sanitizeName(payload?.name,50);const validIds=(Array.isArray(payload?.logoIds)?payload.logoIds:[]).filter(id=>state.logos.some(l=>l.id===id));if(!name)return cb({ok:false,error:'Nom du Tour requis.'});if(!validIds.length)return cb({ok:false,error:'Ajoute au moins un logo au Tour.'});
@@ -679,8 +771,23 @@ io.on('connection', socket=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Une course est déjà en cours.'});const tour=state.tours.find(t=>t.id===payload?.tourId);if(!tour)return cb({ok:false,error:'Tour introuvable.'});
     let logoIds=tour.logoIds.filter(id=>state.logos.some(l=>l.id===id));if(!logoIds.length)return cb({ok:false,error:'Ce Tour ne contient plus de logo valide.'});const unsecured=logoIds.map(id=>state.logos.find(l=>l.id===id)).filter(l=>l&&!hasSecureAssets(l));if(unsecured.length)return cb({ok:false,error:`Sécurisation en cours pour ${unsecured.length} logo(s) : ${unsecured.slice(0,3).map(l=>l.name).join(', ')}. Réessaie dans quelques secondes.`});if(payload?.resetScores!==false)resetScoresOnly();
     const randomOrder=!!payload?.randomOrder;if(randomOrder)logoIds=shuffleArray(logoIds);
-    state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:tour.id,name:tour.name,logoIds,currentIndex:0,completedStages:0,autoAdvance:!!payload?.autoAdvance,randomOrder,autoEndWhenAllAnswered:payload?.autoEndWhenAllAnswered!==false,skippedStages:[],incidents:[],resultDelaySeconds:clamp(payload?.resultDelaySeconds||state.settings.resultDelaySeconds||10,5,30),roundSeconds:clamp(payload?.roundSeconds||state.settings.roundSeconds||20,5,120),startedAt:Date.now()};saveState();emitState();
+    const preset=PRESETS[payload?.presetKey]||{};state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:tour.id,name:tour.name,logoIds,currentIndex:0,completedStages:0,
+      autoAdvance:payload?.autoAdvance!==undefined?!!payload.autoAdvance:!!preset.autoAdvance,randomOrder,autoEndWhenAllAnswered:payload?.autoEndWhenAllAnswered!==undefined?!!payload.autoEndWhenAllAnswered:preset.autoEndWhenAllAnswered!==false,
+      skippedStages:[],incidents:[],resultDelaySeconds:clamp(payload?.resultDelaySeconds??preset.resultDelaySeconds??state.settings.resultDelaySeconds??10,3,30),roundSeconds:clamp(payload?.roundSeconds??preset.roundSeconds??state.settings.roundSeconds??20,5,120),
+      qualifyingRatio:clamp(payload?.qualifyingRatio??preset.qualifyingRatio??state.settings.qualifyingRatio??.5,.25,1),scoreMultiplier:clamp(payload?.scoreMultiplier??preset.scoreMultiplier??state.settings.scoreMultiplier??2,.5,5),
+      showHex:payload?.showHex!==undefined?!!payload.showHex:(preset.showHex!==undefined?!!preset.showHex:state.settings.showHex!==false),greenEnabled:payload?.greenEnabled!==false,mountainEnabled:payload?.mountainEnabled!==false,
+      countdownSeconds:clamp(payload?.countdownSeconds??preset.countdownSeconds??state.settings.countdownSeconds??3,1,5),presetKey:PRESETS[payload?.presetKey]?payload.presetKey:null,startedAt:Date.now()};
+    logAdmin('tour_started',{name:tour.name,stages:logoIds.length,randomOrder,presetKey:state.activeTour.presetKey});saveState();emitState();
     const result=launchCurrentTourStage();cb(result);
+  });
+  socket.on('admin-start-quick-tour',(payload,cb=()=>{})=>{
+    if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Une course est déjà en cours.'});
+    const logoIds=quickLogoIds(payload?.count||10,payload?.selectionMode||'balanced');if(!logoIds.length)return cb({ok:false,error:'Aucun logo sécurisé disponible.'});
+    if(payload?.resetScores!==false)resetScoresOnly();const presetKey=PRESETS[payload?.presetKey]?payload.presetKey:'soiree',preset=PRESETS[presetKey];let ordered=payload?.randomOrder===false?logoIds:shuffleArray(logoIds);
+    state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:null,name:sanitizeName(payload?.name||`Tour express ${ordered.length} étapes`,50),logoIds:ordered,currentIndex:0,completedStages:0,
+      autoAdvance:payload?.autoAdvance!==undefined?!!payload.autoAdvance:!!preset.autoAdvance,randomOrder:payload?.randomOrder!==false,autoEndWhenAllAnswered:preset.autoEndWhenAllAnswered!==false,skippedStages:[],incidents:[],
+      resultDelaySeconds:preset.resultDelaySeconds,roundSeconds:preset.roundSeconds,qualifyingRatio:preset.qualifyingRatio,scoreMultiplier:preset.scoreMultiplier,showHex:preset.showHex!==false,greenEnabled:true,mountainEnabled:true,countdownSeconds:preset.countdownSeconds,presetKey,startedAt:Date.now()};
+    logAdmin('quick_tour_started',{name:state.activeTour.name,stages:ordered.length,presetKey});saveState();emitState();cb(launchCurrentTourStage());
   });
   socket.on('admin-next-tour-round',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});if(state.activeRound)return cb({ok:false,error:'Une étape est déjà en cours.'});if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}cb(launchCurrentTourStage());});
   socket.on('admin-finish-tour',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});if(state.activeRound)return cb({ok:false,error:'Termine l’étape en cours avant le Tour.'});const summary=finalizeTour('manual');cb({ok:true,summary});});
@@ -712,12 +819,17 @@ io.on('connection', socket=>{
 
   socket.on('admin-start-round',({logoId,durationSeconds,autoEndWhenAllAnswered},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeTour)return cb({ok:false,error:'Un Tour est en cours : utilise “Étape suivante”.'});cb(startRoundInternal(logoId,durationSeconds,{autoEndWhenAllAnswered:autoEndWhenAllAnswered!==undefined?!!autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false}));});
   socket.on('admin-end-round',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeRound)return cb({ok:false,error:'Aucune manche.'});if(Date.now()<state.activeRound.startedAt)return cb({ok:false,error:'Le compte à rebours est encore en cours.'});endRound('manual');cb({ok:true});});
-  socket.on('admin-update-settings',({roundSeconds,resultDelaySeconds,autoEndWhenAllAnswered},cb=()=>{})=>{if(!adminOnly(cb))return;if(roundSeconds!==undefined)state.settings.roundSeconds=clamp(roundSeconds,5,120);if(resultDelaySeconds!==undefined)state.settings.resultDelaySeconds=clamp(resultDelaySeconds,5,30);if(autoEndWhenAllAnswered!==undefined)state.settings.autoEndWhenAllAnswered=!!autoEndWhenAllAnswered;saveState();emitState();cb({ok:true});});
+  socket.on('admin-update-settings',(payload={},cb=()=>{})=>{if(!adminOnly(cb))return;const {roundSeconds,resultDelaySeconds,autoEndWhenAllAnswered,qualifyingRatio,scoreMultiplier,showHex,greenEnabled,mountainEnabled,countdownSeconds}=payload;if(roundSeconds!==undefined)state.settings.roundSeconds=clamp(roundSeconds,5,120);if(resultDelaySeconds!==undefined)state.settings.resultDelaySeconds=clamp(resultDelaySeconds,3,30);if(autoEndWhenAllAnswered!==undefined)state.settings.autoEndWhenAllAnswered=!!autoEndWhenAllAnswered;if(qualifyingRatio!==undefined)state.settings.qualifyingRatio=clamp(qualifyingRatio,.25,1);if(scoreMultiplier!==undefined)state.settings.scoreMultiplier=clamp(scoreMultiplier,.5,5);if(showHex!==undefined)state.settings.showHex=!!showHex;if(greenEnabled!==undefined)state.settings.greenEnabled=!!greenEnabled;if(mountainEnabled!==undefined)state.settings.mountainEnabled=!!mountainEnabled;if(countdownSeconds!==undefined)state.settings.countdownSeconds=clamp(countdownSeconds,1,5);logAdmin('settings_updated',{...state.settings});saveState();emitState();cb({ok:true,settings:state.settings});});
+  socket.on('admin-resume-recovery',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Une course est déjà active.'});const rec=state.recoverySession;if(!rec?.activeTour)return cb({ok:false,error:'Aucune course interrompue à reprendre.'});state.activeTour=JSON.parse(JSON.stringify(rec.activeTour));state.activeTour.autoAdvance=false;state.activeTour.recoveredAt=Date.now();state.recoverySession=null;logAdmin('recovery_resumed',{name:state.activeTour.name,stage:state.activeTour.currentIndex+1});saveState();emitState();cb({ok:true});});
+  socket.on('admin-discard-recovery',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.recoverySession=null;logAdmin('recovery_discarded');saveState();emitState();cb({ok:true});});
+  socket.on('admin-restore-checkpoint',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb(restoreCheckpoint());});
+  socket.on('admin-clear-records',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.records={games:0,updatedAt:null,bestProximity:null,fastest90:null,lowestProximity:null,bestGameAverage:null,mountainGame:null};state.career={};logAdmin('records_cleared');saveState();emitState();cb({ok:true});});
+  socket.on('admin-apply-preset',({presetKey},cb=()=>{})=>{if(!adminOnly(cb))return;const preset=PRESETS[presetKey];if(!preset)return cb({ok:false,error:'Preset inconnu.'});Object.assign(state.settings,{roundSeconds:preset.roundSeconds,resultDelaySeconds:preset.resultDelaySeconds,autoEndWhenAllAnswered:preset.autoEndWhenAllAnswered,qualifyingRatio:preset.qualifyingRatio,scoreMultiplier:preset.scoreMultiplier,countdownSeconds:preset.countdownSeconds,showHex:preset.showHex});logAdmin('preset_applied',{presetKey});saveState();emitState();cb({ok:true,settings:state.settings});});
   socket.on('admin-reset-scores',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Termine la course avant de réinitialiser.'});resetScoresOnly();state.lastTourSummary=null;saveState();emitState();cb({ok:true});});
   socket.on('admin-clear-players',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Termine la course avant de vider les joueurs.'});state.players={};state.roundHistory=[];state.lastTourSummary=null;saveState();emitState();cb({ok:true});});
   socket.on('admin-new-room-code',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.roomCode=roomCode();saveState();emitState();cb({ok:true,roomCode:state.roomCode});});
 
-  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:5,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
+  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:6,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
   socket.on('admin-import-pack',({pack},cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Import impossible pendant une course.'});if(!pack||!Array.isArray(pack.logos))return cb({ok:false,error:'Fichier de pack invalide.'});
     const idMap=new Map();let added=0;
@@ -729,5 +841,5 @@ io.on('connection', socket=>{
   socket.on('disconnect',()=>{const pid=socket.data.playerId;if(pid&&state.players[pid]){state.players[pid].online=false;state.players[pid].lastSeen=Date.now();saveState();emitState();}});
 });
 
-app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour,scoringModel:'CIEDE2000',autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false}));
+app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour,scoringModel:'CIEDE2000',autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false,storageWritable:STORAGE_WRITABLE,persistentVolume:path.resolve(DATA_DIR)==='/data',recoveryAvailable:!!state.recoverySession}));
 server.listen(PORT,()=>{console.log(`Toon Tone Tour ${APP_VERSION} listening on :${PORT}`);console.log(`Data directory: ${DATA_DIR}`);if(!process.env.ADMIN_PASSWORD)console.warn('WARNING: ADMIN_PASSWORD is not set. Default password is "admin".');});

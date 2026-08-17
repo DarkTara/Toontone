@@ -1,12 +1,13 @@
 {
   "name": "toon-tone-tour",
-  "version": "3.3.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "Toon Tone Tour V3.3 — fin intelligente des étapes, Tours aléatoires, préparation express et gestion d’incidents",
+  "description": "Toon Tone Tour V4 — Grand Tour Edition : refonte visuelle, records, bibliothèque avancée, reprise après incident et presets.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test": "node tests/scoring.test.js"
   },
   "engines": {
     "node": ">=20"
