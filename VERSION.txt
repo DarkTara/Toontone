@@ -1,1 +1,1 @@
-2.3.0 - gameplay Tour enrichi, difficulté auto, top 5 montagne, équité retardataires, résultats avancés, édition logos
+3.0.0 - Grand Tour: roue chromatique, playlists, podium final, statistiques

@@ -1,134 +1,46 @@
-const socket=io(), $=id=>document.getElementById(id);
+const socket=io(),$=id=>document.getElementById(id);
 let adminState=null,fileData=null,ticker=null,previewRenderer=null,editingLogoId=null,targetAreaRatio=0;
+let tourEditingId=null,tourQueue=[],tourDirty=false;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
-const fmtMs=ms=>(ms/1000).toFixed(1)+' s';
-const CATS={easy:{label:'Facile',emoji:'🟢',points:2},medium:{label:'Moyen',emoji:'🔵',points:5},hard:{label:'Difficile',emoji:'🟡',points:10},very_hard:{label:'Très difficile',emoji:'🔴',points:15},hc:{label:'Hors catégorie',emoji:'⚫',points:20}};
-
-function status(id,msg,bad=false){const e=$(id);e.textContent=msg;e.className='status '+(bad?'error':'success')}
-function qualNote(p){return !p.qualified&&p.totalRounds?` <span class="qual-note">⚠ ${p.playedRounds}/${p.totalRounds}</span>`:''}
-function standingsHtml(type,title,rows,scoreFn){return `<div class="jersey ${type}"><h3>${title}</h3>${rows.slice(0,7).map((p,i)=>`<div class="rank-row ${!p.qualified&&type!=='polka'?'provisional':''}"><div class="rank-num">${i+1}</div><div class="rank-name">${esc(p.name)}${p.online?'<span class="online-dot"></span>':''}</div><div class="rank-score">${scoreFn(p)}</div></div>`).join('')||'<div class="tiny muted">Pas de scores.</div>'}</div>`}
-
-function areaScore(r){if(r>.40)return 0;if(r>.15)return 1;if(r>.05)return 2;return 3}
-function difficultyPreview(){
-  const n={huge:0,known:1,lesser:2,niche:3}[$('notoriety').value]??1;
-  const i={main:0,secondary:1,accent:2}[$('colorImportance').value]??1;
-  const d={iconic:0,distinctive:1,generic:2}[$('colorDistinctiveness').value]??1;
-  const score=Math.max(1,Math.min(10,1+n+areaScore(targetAreaRatio)+i+d));
-  let auto='easy'; if(score>=9)auto='hc'; else if(score>=7)auto='very_hard'; else if(score>=5)auto='hard'; else if(score>=3)auto='medium';
-  const mode=$('difficultyMode').value;
-  const key=mode==='auto'?auto:mode;
-  const c=CATS[key]||CATS.medium;
-  const pct=(targetAreaRatio*100).toFixed(1);
-  $('difficultyEstimate').innerHTML=`${c.emoji} <strong>${c.label}</strong> · <strong>${c.points} pts</strong> montagne · score estimé ${score}/10 · zone ciblée ${pct}%${mode==='auto'?'':' · catégorie forcée'}`;
-  return {score,key};
+const CATS={easy:{emoji:'🟢',label:'Facile',points:2},medium:{emoji:'🔵',label:'Moyen',points:5},hard:{emoji:'🟡',label:'Difficile',points:10},very_hard:{emoji:'🔴',label:'Très difficile',points:15},hc:{emoji:'⚫',label:'Hors catégorie',points:20}};
+function ms(v){return(v/1000).toFixed(1)+' s';}
+function status(id,msg,bad=false){const e=$(id);e.textContent=msg;e.className='status '+(bad?'error':'success');}
+function difficultyPreview(){const notoriety={huge:0,known:1,lesser:2,niche:3}[$('notoriety').value]??1,importance={main:0,secondary:1,accent:2}[$('colorImportance').value]??1,distinct={iconic:0,distinctive:1,generic:2}[$('colorDistinctiveness').value]??1,r=targetAreaRatio,area=r>.4?0:r>.15?1:r>.05?2:3,score=Math.max(1,Math.min(10,1+notoriety+importance+distinct+area));let key=score>=9?'hc':score>=7?'very_hard':score>=5?'hard':score>=3?'medium':'easy';if($('difficultyMode').value!=='auto')key=$('difficultyMode').value;const c=CATS[key],pct=(r*100).toFixed(1);$('difficultyEstimate').innerHTML=`${c.emoji} <strong>${c.label}</strong> · <strong>${c.points} pts</strong> montagne · score ${score}/10 · zone ${pct}%${$('difficultyMode').value==='auto'?'':' · catégorie forcée'}`;}
+function logoPayload(){return{name:$('logoName').value.trim(),targetColor:$('targetColor').value.toUpperCase(),colorTolerance:Number($('colorTolerance').value),logoImage:fileData,notoriety:$('notoriety').value,colorImportance:$('colorImportance').value,colorDistinctiveness:$('colorDistinctiveness').value,difficultyMode:$('difficultyMode').value,targetAreaRatio};}
+function standingsHtml(type,title,rows,score){return`<div class="jersey ${type}"><h3>${title}</h3>${rows.slice(0,6).map((p,i)=>`<div class="rank-row"><div class="rank-num">${i+1}</div><div class="rank-name">${esc(p.name)}</div><div class="rank-score">${score(p)}</div></div>`).join('')||'<div class="tiny muted">Pas de score.</div>'}</div>`;}
+function renderTourQueue(){if(!adminState)return;$('tourQueue').innerHTML=tourQueue.length?tourQueue.map((id,i)=>{const l=adminState.logos.find(x=>x.id===id);return`<div class="tour-queue-row"><div class="tour-step-num">${i+1}</div><img src="${l?.logoImage||''}"><div class="tour-step-name"><strong>${esc(l?.name||'Logo supprimé')}</strong><span>${CATS[l?.difficultyCategory]?.emoji||'🏔️'} ${l?.difficultyPoints||0} pts</span></div><div class="tour-move"><button class="btn-soft" data-up="${i}" ${i===0?'disabled':''}>↑</button><button class="btn-soft" data-down="${i}" ${i===tourQueue.length-1?'disabled':''}>↓</button><button class="btn-danger" data-remove="${i}">×</button></div></div>`;}).join(''):'<div class="tiny muted">Ajoute des logos au parcours.</div>';}
+function loadTour(id){const t=adminState?.tours.find(x=>x.id===id);tourEditingId=t?.id||null;tourQueue=t?[...t.logoIds]:[];$('tourName').value=t?.name||'';$('tourSelect').value=t?.id||'';tourDirty=false;renderTourQueue();}
+function syncTourOptions(){const current=tourEditingId;$('tourSelect').innerHTML='<option value="">Nouveau Tour</option>'+adminState.tours.map(t=>`<option value="${t.id}">${esc(t.name)} · ${t.logoCount} étapes</option>`).join('');if(current&&adminState.tours.some(t=>t.id===current))$('tourSelect').value=current;else if(current){tourEditingId=null;tourQueue=[];$('tourSelect').value='';renderTourQueue();}}
+function render(s){adminState=s;$('roomCode').textContent=s.roomCode;$('joinUrl').textContent=location.origin+'/?room='+s.roomCode;$('roundSeconds').value=s.settings.roundSeconds||20;if(document.activeElement!==$('tourRoundSeconds'))$('tourRoundSeconds').value=$('tourRoundSeconds').value||s.settings.roundSeconds||20;if(document.activeElement!==$('resultDelaySeconds'))$('resultDelaySeconds').value=s.settings.resultDelaySeconds||10;
+  $('standings').innerHTML=standingsHtml('yellow','🟨 Jaune',s.standings.yellow,p=>p.yellowCount?`${p.yellowAvg.toFixed(1)}%`:'—')+standingsHtml('green','🟩 Vert',s.standings.green,p=>p.yellowCount?ms(p.greenAdjusted):'—')+standingsHtml('polka','🔴 Pois',s.standings.polka,p=>`${p.mountainPoints} pts`);
+  $('logoCount').textContent=`${s.logos.length} logo${s.logos.length>1?'s':''}`;$('logoList').innerHTML=s.logos.map(l=>{const c=CATS[l.difficultyCategory]||{emoji:'🏔️',label:l.difficultyLabel||'Moyen'};return`<div class="logo-row"><img src="${l.logoImage}"><div class="logo-meta"><strong>${esc(l.name)}</strong><small><span class="color-dot" style="background:${l.targetColor}"></span>${l.targetColor} · tol. ${l.colorTolerance||42}<br>${c.emoji} ${esc(c.label)} · ${l.difficultyPoints} pts · ${l.difficultyScore||'?'} / 10</small></div><div class="admin-actions"><button class="btn-soft" data-edit="${l.id}">✎</button><button class="btn-danger" data-del="${l.id}">×</button></div></div>`;}).join('')||'<div class="tiny muted">Aucun logo.</div>';
+  const opts=s.logos.map(l=>`<option value="${l.id}">${esc(l.name)} · ${CATS[l.difficultyCategory]?.emoji||'🏔️'} ${l.difficultyPoints} pts</option>`).join('');$('roundLogo').innerHTML=opts;$('tourLogoSelect').innerHTML=opts||'<option value="">Aucun logo</option>';syncTourOptions();renderTourQueue();
+  $('playerCount').textContent=`${s.players.length} joueur${s.players.length>1?'s':''}`;$('playerList').innerHTML=s.players.map(p=>`<div class="rank-row"><div>${p.online?'🟢':'⚪'}</div><div class="rank-name">${esc(p.name)}</div><div class="tiny">${p.playedRounds}/${p.totalRounds} · ${p.yellowCount?p.yellowAvg.toFixed(1)+'%':'—'}</div></div>`).join('')||'<div class="tiny muted">Personne dans le peloton.</div>';
+  $('history').innerHTML=s.roundHistory.slice(0,10).map(h=>`<div class="history-item"><strong>${h.tourStageNumber?`Étape ${h.tourStageNumber}/${h.tourStageCount}`:`Étape ${h.roundNumber||'?'}`} · ${esc(h.logoName)}</strong> <span class="tiny muted">${h.difficultyEmoji||'🏔️'} ${esc(h.difficultyLabel||'')} · ${h.difficultyPoints} pts</span>${h.tourName?`<div class="tiny muted">${esc(h.tourName)}</div>`:''}<div class="tiny">${h.results.slice(0,5).map((r,i)=>`${i+1}. ${esc(r.name)} ${r.proximity.toFixed(1)}%${r.mountainGain?` (+${r.mountainGain})`:''}`).join(' · ')}</div></div>`).join('')||'<div class="tiny muted">Aucune étape terminée.</div>';
+  const t=s.activeTour;$('tourControls').classList.toggle('hidden',!t);$('tourLiveBanner').classList.toggle('hidden',!t);$('roundPanel').classList.toggle('hidden',!!t);$('startTour').disabled=!!t||!!s.activeRound;$('saveTour').disabled=!!t;$('deleteTour').disabled=!!t;
+  if(t){const inRound=!!s.activeRound,done=t.completedStages||0;$('tourLiveBanner').innerHTML=`<strong>🚲 ${esc(t.name)}</strong><span>${done}/${t.totalStages} étapes terminées · ${t.autoAdvance?'enchaînement automatique':'pilotage manuel'}</span>`;$('tourProgressText').innerHTML=`<strong>${esc(t.name)}</strong> · ${done}/${t.totalStages} terminées${t.nextLogoName&&!inRound?` · prochaine : <strong>${esc(t.nextLogoName)}</strong>`:''}`;$('tourProgressBar').style.width=`${t.totalStages?done/t.totalStages*100:0}%`;$('nextTourRound').disabled=inRound||t.currentIndex>=t.totalStages||t.autoAdvance;$('toggleTourAuto').textContent=`Auto : ${t.autoAdvance?'ON':'OFF'}`;$('toggleTourAuto').className=t.autoAdvance?'btn-green':'btn-soft';$('finishTour').disabled=inRound;}
+  if(s.activeRound){const r=s.activeRound;$('roundPanel').classList.add('hidden');$('activePanel').classList.remove('hidden');$('roundTitle').textContent=`${r.tourStageNumber?`Étape ${r.tourStageNumber}/${r.tourStageCount}`:`Étape ${r.roundNumber}`} · ${r.logoName}`;$('activeLogo').src=r.logoImage;$('activeDifficulty').textContent=`${r.difficultyEmoji||'🏔️'} ${r.difficultyLabel||''} · ${r.difficultyPoints||0} pts montagne`;$('answerCount').textContent=r.answerCount;$('participantCount').textContent=r.participantCount;$('answerBar').style.width=`${r.participantCount?r.answerCount/r.participantCount*100:0}%`;startTicker(r);}else{$('activePanel').classList.add('hidden');if(!t)$('roundPanel').classList.remove('hidden');$('roundTitle').textContent=t?`${t.name} · ${t.completedStages}/${t.totalStages}`:'Aucune étape';$('roundTimer').textContent='—';clearInterval(ticker);}
 }
-function logoPayload(){
-  return {
-    name:$('logoName').value,
-    targetColor:$('targetColor').value,
-    colorTolerance:$('colorTolerance').value,
-    logoImage:fileData,
-    notoriety:$('notoriety').value,
-    colorImportance:$('colorImportance').value,
-    colorDistinctiveness:$('colorDistinctiveness').value,
-    difficultyMode:$('difficultyMode').value,
-    targetAreaRatio
-  };
-}
+function startTicker(r){clearInterval(ticker);const f=()=>{const now=Date.now();$('roundTimer').textContent=now<r.startedAt?`${Math.max(1,Math.ceil((r.startedAt-now)/1000))}…`:`${(Math.max(0,r.endsAt-now)/1000).toFixed(1)} s`;};f();ticker=setInterval(f,100);}
+async function setPreview(src,target,tol){previewRenderer=await LogoTone.create($('previewCanvas'),src,target,tol);previewRenderer.render(null);const st=previewRenderer.maskStats?.();targetAreaRatio=st?.ratio||0;$('previewWrap').classList.remove('hidden');difficultyPreview();}
+function resetLogoForm(){editingLogoId=null;fileData=null;previewRenderer=null;targetAreaRatio=0;$('logoFormTitle').textContent='Ajouter un logo';$('addLogo').textContent='Ajouter au catalogue';$('cancelEdit').classList.add('hidden');$('logoName').value='';$('targetColor').value='#F28C28';$('colorTolerance').value=42;$('toleranceValue').textContent='42';$('logoFile').value='';$('notoriety').value='known';$('colorImportance').value='secondary';$('colorDistinctiveness').value='distinctive';$('difficultyMode').value='auto';$('previewWrap').classList.add('hidden');$('logoStatus').classList.add('hidden');difficultyPreview();}
+async function editLogo(id){const l=adminState.logos.find(x=>x.id===id);if(!l)return;editingLogoId=id;fileData=l.logoImage;targetAreaRatio=l.targetAreaRatio||0;$('logoFormTitle').textContent='Modifier '+l.name;$('addLogo').textContent='Enregistrer les modifications';$('cancelEdit').classList.remove('hidden');$('logoName').value=l.name;$('targetColor').value=l.targetColor;$('colorTolerance').value=l.colorTolerance||42;$('toleranceValue').textContent=l.colorTolerance||42;$('notoriety').value=l.notoriety||'known';$('colorImportance').value=l.colorImportance||'secondary';$('colorDistinctiveness').value=l.colorDistinctiveness||'distinctive';$('difficultyMode').value=l.difficultyMode||l.difficultyCategory||'auto';await setPreview(l.logoImage,l.targetColor,l.colorTolerance||42);$('logoEditorCard').scrollIntoView({behavior:'smooth'});}
 
-function render(s){
-  adminState=s;
-  $('roomCode').textContent=s.roomCode;
-  $('joinUrl').textContent=location.origin+'/?room='+s.roomCode;
-  $('standings').innerHTML=
-    standingsHtml('yellow','🟨 Jaune',s.standings.yellow,p=>p.yellowCount?`${p.yellowAvg.toFixed(1)}%${qualNote(p)}`:'—')+
-    standingsHtml('green','🟩 Vert',s.standings.green,p=>p.yellowCount?`${fmtMs(p.greenAdjusted)}${qualNote(p)}`:'—')+
-    standingsHtml('polka','🔴 Pois',s.standings.polka,p=>`${p.mountainPoints} pts`);
+$('loginBtn').onclick=()=>socket.emit('admin-login',{password:$('password').value},r=>{if(!r.ok)return status('loginStatus',r.error,true);$('loginCard').classList.add('hidden');$('adminApp').classList.remove('hidden');if(r.insecureDefault)alert('Sécurité : configure ADMIN_PASSWORD dans Railway.');render(r.state);difficultyPreview();});socket.on('admin-state',render);
+$('logoFile').onchange=()=>{const f=$('logoFile').files[0];if(!f)return;const rd=new FileReader();rd.onload=async()=>{fileData=rd.result;await setPreview(fileData,$('targetColor').value,$('colorTolerance').value);};rd.readAsDataURL(f);};
+$('colorTolerance').oninput=()=>{$('toleranceValue').textContent=$('colorTolerance').value;if(previewRenderer){previewRenderer.rebuildMask($('targetColor').value,$('colorTolerance').value);previewRenderer.render(null);const st=previewRenderer.maskStats?.();targetAreaRatio=st?.ratio||0;difficultyPreview();}};
+$('targetColor').oninput=()=>{if(previewRenderer){previewRenderer.rebuildMask($('targetColor').value,$('colorTolerance').value);previewRenderer.render(null);const st=previewRenderer.maskStats?.();targetAreaRatio=st?.ratio||0;difficultyPreview();}};['notoriety','colorImportance','colorDistinctiveness','difficultyMode'].forEach(id=>$(id).addEventListener('change',difficultyPreview));
+$('previewCanvas').addEventListener('click',e=>{if(!previewRenderer)return;const sampled=previewRenderer.sampleAtEvent(e);if(!sampled)return;$('targetColor').value=sampled;previewRenderer.rebuildMask(sampled,$('colorTolerance').value);previewRenderer.render(null);const st=previewRenderer.maskStats?.();targetAreaRatio=st?.ratio||0;difficultyPreview();status('logoStatus',`Couleur cible : ${sampled} · zone masquée ${(targetAreaRatio*100).toFixed(1)} %`);});
+$('addLogo').onclick=()=>{const payload=logoPayload();if(!payload.name||!payload.logoImage)return status('logoStatus','Nom et image requis.',true);if(editingLogoId){payload.logoId=editingLogoId;socket.emit('admin-update-logo',payload,r=>{if(!r.ok)return status('logoStatus',r.error,true);status('logoStatus','Logo modifié !');setTimeout(resetLogoForm,500);});}else socket.emit('admin-add-logo',payload,r=>{if(!r.ok)return status('logoStatus',r.error,true);status('logoStatus','Logo ajouté !');setTimeout(resetLogoForm,500);});};$('cancelEdit').onclick=resetLogoForm;
+$('logoList').onclick=e=>{const edit=e.target.closest('[data-edit]')?.dataset.edit,del=e.target.closest('[data-del]')?.dataset.del;if(edit)return editLogo(edit);if(del&&confirm('Supprimer ce logo ? Il sera aussi retiré des Tours.'))socket.emit('admin-delete-logo',{logoId:del},r=>{if(!r.ok)alert(r.error);});};
 
-  $('logoCount').textContent=s.logos.length+' logo(s)';
-  $('logoList').innerHTML=s.logos.map(l=>{
-    const cat=CATS[l.difficultyCategory]||{emoji:'🏔️',label:l.difficultyLabel||'Moyen',points:l.difficultyPoints};
-    return `<div class="logo-row"><img src="${l.logoImage}"><div class="logo-meta"><strong>${esc(l.name)}</strong><small><span class="color-dot" style="background:${l.targetColor}"></span>${l.targetColor} · tol. ${l.colorTolerance||42}<br>${cat.emoji} ${esc(cat.label)} · ${l.difficultyPoints} pts · score ${l.difficultyScore||'?'} / 10</small></div><div class="admin-actions"><button class="btn-soft" data-edit="${l.id}">✎</button><button class="btn-danger" data-del="${l.id}">×</button></div></div>`;
-  }).join('')||'<div class="tiny muted">Ajoute ton premier logo.</div>';
+$('newTour').onclick=()=>loadTour(null);$('tourSelect').onchange=()=>loadTour($('tourSelect').value||null);$('tourName').oninput=()=>tourDirty=true;$('addTourLogo').onclick=()=>{const id=$('tourLogoSelect').value;if(!id)return;tourQueue.push(id);tourDirty=true;renderTourQueue();};$('tourQueue').onclick=e=>{const up=e.target.closest('[data-up]')?.dataset.up,down=e.target.closest('[data-down]')?.dataset.down,rem=e.target.closest('[data-remove]')?.dataset.remove;if(up!==undefined){const i=Number(up);[tourQueue[i-1],tourQueue[i]]=[tourQueue[i],tourQueue[i-1]];}else if(down!==undefined){const i=Number(down);[tourQueue[i+1],tourQueue[i]]=[tourQueue[i],tourQueue[i+1]];}else if(rem!==undefined)tourQueue.splice(Number(rem),1);else return;tourDirty=true;renderTourQueue();};
+$('saveTour').onclick=()=>socket.emit('admin-save-tour',{tourId:tourEditingId,name:$('tourName').value.trim(),logoIds:tourQueue},r=>{if(!r.ok)return status('tourStatus',r.error,true);tourEditingId=r.tour.id;tourDirty=false;status('tourStatus','Tour enregistré !');});
+$('deleteTour').onclick=()=>{if(!tourEditingId)return;if(confirm('Supprimer ce Tour ?'))socket.emit('admin-delete-tour',{tourId:tourEditingId},r=>{if(!r.ok)return alert(r.error);loadTour(null);});};
+$('startTour').onclick=()=>{if(!tourEditingId)return status('tourStatus','Enregistre d’abord le Tour.',true);if(tourDirty)return status('tourStatus','Enregistre les modifications du Tour avant le départ.',true);socket.emit('admin-start-tour',{tourId:tourEditingId,roundSeconds:$('tourRoundSeconds').value,resultDelaySeconds:$('resultDelaySeconds').value,autoAdvance:$('autoAdvance').checked,resetScores:$('resetAtTourStart').checked},r=>{if(!r.ok)return status('tourStatus',r.error,true);status('tourStatus','🏁 Tour lancé !');});};
+$('nextTourRound').onclick=()=>socket.emit('admin-next-tour-round',{},r=>{if(!r.ok)alert(r.error);});$('toggleTourAuto').onclick=()=>socket.emit('admin-toggle-auto-tour',{autoAdvance:!adminState.activeTour?.autoAdvance},r=>{if(!r.ok)alert(r.error);});$('finishTour').onclick=()=>{if(confirm('Afficher le classement final maintenant ?'))socket.emit('admin-finish-tour',{},r=>{if(!r.ok)alert(r.error);});};
 
-  const sel=$('roundLogo'); const old=sel.value;
-  sel.innerHTML=s.logos.map(l=>`<option value="${l.id}">${esc(l.name)} · ${(CATS[l.difficultyCategory]?.emoji||'🏔️')} ${l.difficultyPoints} pts</option>`).join('');
-  if(s.logos.some(l=>l.id===old))sel.value=old;
-  $('roundSeconds').value=s.settings.roundSeconds||20;
-
-  $('playerCount').textContent=s.players.length+' joueur(s)';
-  $('playerList').innerHTML=s.players.map(p=>`<div class="rank-row"><div>${p.online?'🟢':'⚪'}</div><div class="rank-name">${esc(p.name)}${!p.qualified&&p.totalRounds?` <span class="qual-note">provisoire ${p.playedRounds}/${p.totalRounds}</span>`:''}</div><div class="rank-score">${p.yellowCount?p.yellowAvg.toFixed(1)+'%':'—'}</div></div>`).join('')||'<div class="tiny muted">Aucun joueur connecté.</div>';
-
-  $('history').innerHTML=s.roundHistory.slice(0,8).map(h=>`<div class="history-item"><strong>Étape ${h.roundNumber||'?'} · ${esc(h.logoName)}</strong> <span class="tiny muted">${h.difficultyEmoji||'🏔️'} ${esc(h.difficultyLabel||'')} · ${h.difficultyPoints} pts</span><div class="tiny">${h.results.slice(0,5).map((r,i)=>`${i+1}. ${esc(r.name)} ${r.proximity.toFixed(1)}%${r.mountainGain?` (+${r.mountainGain})`:''}`).join(' · ')}</div></div>`).join('')||'<div class="tiny muted">Aucune manche terminée.</div>';
-
-  if(s.activeRound){
-    $('roundPanel').classList.add('hidden'); $('activePanel').classList.remove('hidden');
-    $('roundTitle').textContent=`Étape ${s.activeRound.roundNumber} · ${s.activeRound.logoName}`;
-    $('activeLogo').src=s.activeRound.logoImage;
-    $('activeDifficulty').textContent=`${s.activeRound.difficultyEmoji||'🏔️'} ${s.activeRound.difficultyLabel||''} · ${s.activeRound.difficultyPoints||0} pts montagne`;
-    const n=s.activeRound.answerCount,total=Math.max(1,s.activeRound.participantCount||0);
-    $('answerCount').textContent=n; $('participantCount').textContent=s.activeRound.participantCount||0; $('answerBar').style.width=Math.min(100,n/total*100)+'%';
-    startTimer(s.activeRound);
-  }else{
-    $('roundPanel').classList.remove('hidden'); $('activePanel').classList.add('hidden'); $('roundTitle').textContent='Aucune manche'; $('roundTimer').textContent='—'; clearInterval(ticker);
-  }
-}
-
-function startTimer(r){
-  clearInterval(ticker);
-  const d=()=>{
-    const now=Date.now();
-    if(now<r.startedAt){$('roundTimer').textContent='Départ '+Math.max(1,Math.ceil((r.startedAt-now)/1000));return;}
-    $('roundTimer').textContent=(Math.max(0,r.endsAt-now)/1000).toFixed(1);
-  };
-  d(); ticker=setInterval(d,100);
-}
-
-async function rebuildPreview(){
-  if(!fileData)return;
-  try{
-    if(!previewRenderer){previewRenderer=await LogoTone.create($('previewCanvas'),fileData,$('targetColor').value,$('colorTolerance').value)}
-    else{previewRenderer.rebuildMask($('targetColor').value,$('colorTolerance').value);previewRenderer.render(null)}
-    const stats=previewRenderer.maskStats?.(); targetAreaRatio=stats?.ratio||0; difficultyPreview(); $('previewWrap').classList.remove('hidden');
-  }catch(e){status('logoStatus','Impossible de prévisualiser cette image.',true)}
-}
-
-function resetLogoForm(){
-  editingLogoId=null; fileData=null; previewRenderer=null; targetAreaRatio=0;
-  $('logoFormTitle').textContent='Ajouter un logo'; $('addLogo').textContent='Ajouter au parcours'; $('cancelEdit').classList.add('hidden');
-  $('logoName').value=''; $('logoFile').value=''; $('targetColor').value='#F28C28'; $('colorTolerance').value='42'; $('toleranceValue').textContent='42';
-  $('notoriety').value='known'; $('colorImportance').value='secondary'; $('colorDistinctiveness').value='distinctive'; $('difficultyMode').value='auto';
-  $('previewWrap').classList.add('hidden'); $('logoStatus').classList.add('hidden'); difficultyPreview();
-}
-
-async function editLogo(id){
-  const l=adminState?.logos.find(x=>x.id===id); if(!l)return;
-  editingLogoId=id; fileData=l.logoImage; previewRenderer=null; targetAreaRatio=Number(l.targetAreaRatio)||0;
-  $('logoFormTitle').textContent='Modifier '+l.name; $('addLogo').textContent='Enregistrer les modifications'; $('cancelEdit').classList.remove('hidden');
-  $('logoName').value=l.name; $('targetColor').value=l.targetColor; $('colorTolerance').value=l.colorTolerance||42; $('toleranceValue').textContent=l.colorTolerance||42;
-  $('notoriety').value=l.notoriety||'known'; $('colorImportance').value=l.colorImportance||'secondary'; $('colorDistinctiveness').value=l.colorDistinctiveness||'distinctive'; $('difficultyMode').value=l.difficultyMode||l.difficultyCategory||'auto';
-  await rebuildPreview(); document.getElementById('logoEditorCard').scrollIntoView({behavior:'smooth',block:'start'});
-}
-
-$('loginBtn').onclick=()=>socket.emit('admin-login',{password:$('password').value},r=>{if(!r.ok)return status('loginStatus',r.error,true);$('loginCard').classList.add('hidden');$('adminApp').classList.remove('hidden');if(r.insecureDefault)alert('Sécurité : le mot de passe admin par défaut est "admin". Configure ADMIN_PASSWORD dans Railway.');render(r.state);difficultyPreview()});
-socket.on('admin-state',render);
-$('logoFile').onchange=()=>{const f=$('logoFile').files[0];if(!f)return;if(f.size>2_200_000)return status('logoStatus','Image trop lourde (vise moins de 2 Mo).',true);const rd=new FileReader();rd.onload=async()=>{fileData=rd.result;previewRenderer=null;await rebuildPreview()};rd.readAsDataURL(f)};
-$('targetColor').addEventListener('input',rebuildPreview);
-$('colorTolerance').addEventListener('input',()=>{$('toleranceValue').textContent=$('colorTolerance').value;rebuildPreview()});
-['notoriety','colorImportance','colorDistinctiveness','difficultyMode'].forEach(id=>$(id).addEventListener('change',difficultyPreview));
-$('previewCanvas').addEventListener('click',e=>{if(!previewRenderer)return;const sampled=previewRenderer.sampleAtEvent(e);if(!sampled)return;$('targetColor').value=sampled;previewRenderer.rebuildMask(sampled,$('colorTolerance').value);previewRenderer.render(null);const stats=previewRenderer.maskStats?.();targetAreaRatio=stats?.ratio||0;difficultyPreview();const pct=(targetAreaRatio*100).toFixed(1);status('logoStatus','Couleur cible sélectionnée : '+sampled+' · zone masquée : '+pct+' % du logo')});
-$('addLogo').onclick=()=>{
-  if(!fileData)return status('logoStatus','Choisis une image.',true);
-  const payload=logoPayload();
-  if(editingLogoId){payload.logoId=editingLogoId;socket.emit('admin-update-logo',payload,r=>{if(!r.ok)return status('logoStatus',r.error,true);status('logoStatus','Logo modifié !');setTimeout(resetLogoForm,500)})}
-  else socket.emit('admin-add-logo',payload,r=>{if(!r.ok)return status('logoStatus',r.error,true);status('logoStatus','Logo ajouté !');setTimeout(resetLogoForm,500)});
-};
-$('cancelEdit').onclick=resetLogoForm;
-$('logoList').onclick=e=>{const edit=e.target.closest('[data-edit]')?.dataset.edit;const del=e.target.closest('[data-del]')?.dataset.del;if(edit)return editLogo(edit);if(del&&confirm('Supprimer ce logo ?'))socket.emit('admin-delete-logo',{logoId:del},r=>{if(!r.ok)alert(r.error)})};
-$('startRound').onclick=()=>{if(!$('roundLogo').value)return alert('Ajoute au moins un logo.');socket.emit('admin-start-round',{logoId:$('roundLogo').value,durationSeconds:$('roundSeconds').value},r=>{if(!r.ok)alert(r.error)})};
-$('endRound').onclick=()=>socket.emit('admin-end-round',{},r=>{if(!r.ok)alert(r.error)});
-$('roundSeconds').onchange=()=>socket.emit('admin-update-settings',{roundSeconds:$('roundSeconds').value},()=>{});
-$('resetScores').onclick=()=>{if(confirm('Réinitialiser tous les classements ?'))socket.emit('admin-reset-scores',{},r=>{if(!r.ok)alert(r.error)})};
-$('clearPlayers').onclick=()=>{if(confirm('Supprimer tous les joueurs et scores ?'))socket.emit('admin-clear-players',{},r=>{if(!r.ok)alert(r.error)})};
-$('newCode').onclick=()=>{if(confirm('Changer le code de salle ? Les nouveaux joueurs devront utiliser le nouveau code.'))socket.emit('admin-new-room-code',{},()=>{})};
-$('copyLink').onclick=async()=>{await navigator.clipboard.writeText(location.origin+'/?room='+adminState.roomCode);$('copyLink').textContent='Copié !';setTimeout(()=>$('copyLink').textContent='Copier le lien',1300)};
+$('startRound').onclick=()=>{if(!$('roundLogo').value)return alert('Ajoute un logo.');socket.emit('admin-start-round',{logoId:$('roundLogo').value,durationSeconds:$('roundSeconds').value},r=>{if(!r.ok)alert(r.error);});};$('endRound').onclick=()=>socket.emit('admin-end-round',{},r=>{if(!r.ok)alert(r.error);});$('roundSeconds').onchange=()=>socket.emit('admin-update-settings',{roundSeconds:$('roundSeconds').value},()=>{});$('resultDelaySeconds').onchange=()=>socket.emit('admin-update-settings',{resultDelaySeconds:$('resultDelaySeconds').value},()=>{});
+$('resetScores').onclick=()=>{if(confirm('Réinitialiser tous les classements ?'))socket.emit('admin-reset-scores',{},r=>{if(!r.ok)alert(r.error);});};$('clearPlayers').onclick=()=>{if(confirm('Supprimer tous les joueurs et scores ?'))socket.emit('admin-clear-players',{},r=>{if(!r.ok)alert(r.error);});};$('newCode').onclick=()=>{if(confirm('Changer le code de salle ?'))socket.emit('admin-new-room-code',{},()=>{});};$('copyLink').onclick=async()=>{await navigator.clipboard.writeText(location.origin+'/?room='+adminState.roomCode);$('copyLink').textContent='Copié !';setTimeout(()=>$('copyLink').textContent='Copier le lien',1300);};
+$('exportPack').onclick=()=>socket.emit('admin-export-pack',{},r=>{if(!r.ok)return status('packStatus',r.error,true);const blob=new Blob([JSON.stringify(r.pack,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`toon-tone-pack-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),500);status('packStatus',`${r.pack.logos.length} logos et ${r.pack.tours.length} Tours exportés.`);});
+$('importPack').onchange=()=>{const f=$('importPack').files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{try{const pack=JSON.parse(rd.result);socket.emit('admin-import-pack',{pack},r=>{if(!r.ok)return status('packStatus',r.error,true);status('packStatus',`${r.added} logos et ${r.tourAdded} Tours importés.`);});}catch{status('packStatus','JSON invalide.',true);}};rd.readAsText(f);};

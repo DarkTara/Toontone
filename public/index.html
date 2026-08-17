@@ -1,47 +1,14 @@
-<!doctype html>
-<html lang="fr">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Toon Tone Tour</title><link rel="stylesheet" href="/styles.css"></head>
-<body>
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Toon Tone Tour</title><link rel="stylesheet" href="/styles.css"></head><body>
 <header class="topbar"><div class="topbar-inner"><div class="brand"><div class="brand-mark">🚲</div><div><div class="tour-word">TOON TONE TOUR</div><div class="tiny muted">La couleur dans le peloton</div></div></div><div class="room-pill" id="roomPill">Salle —</div></div></header>
 <main class="container">
-<section id="joinView" class="hero">
-  <div class="card hero-card race-card"><div class="kicker">Jeu multijoueur en direct</div><h1>À toi de retrouver la couleur.</h1><p class="lede">Une seule couleur du logo est masquée. Les autres restent intactes : choisis la teinte qui te semble la plus fidèle, observe le code hexadécimal, valide avant la fin du chrono et grimpe au général.</p><div class="divider"></div><div class="grid grid-3"><div><strong>🟨 Maillot jaune</strong><div class="tiny muted">Meilleure proximité moyenne</div></div><div><strong>🟩 Maillot vert</strong><div class="tiny muted">Temps cumulé ajusté</div></div><div><strong>🔴 Maillot à pois</strong><div class="tiny muted">Top 5 sur les logos difficiles</div></div></div></div>
-  <div class="card"><div class="kicker">Rejoindre l'étape</div><h2>Entre dans le peloton</h2><div class="field"><label for="name">Ton pseudo</label><input id="name" type="text" maxlength="24" placeholder="Ex. Sébastien"></div><div class="field"><label for="code">Code de salle</label><input id="code" type="text" maxlength="5" placeholder="ABCDE" style="text-transform:uppercase"></div><button id="joinBtn" class="btn-yellow" style="width:100%">Rejoindre la course</button><div id="joinStatus" class="status hidden" style="margin-top:12px"></div><p class="tiny muted">Animateur ? <a href="/admin.html"><strong>Ouvrir le poste de direction de course</strong></a></p></div>
-</section>
+<section id="joinView" class="hero"><div class="card hero-card race-card"><div class="kicker">Jeu multijoueur en direct</div><h1>Retrouve la couleur. Prends les maillots.</h1><p class="lede">Une couleur du logo disparaît. Replace-la avec la roue chromatique, garde un œil sur ton code HEX et tente de gagner le Tour.</p><div class="divider"></div><div class="grid grid-3"><div><strong>🟨 Maillot jaune</strong><div class="tiny muted">Meilleure proximité moyenne</div></div><div><strong>🟩 Maillot vert</strong><div class="tiny muted">Temps cumulé le plus faible</div></div><div><strong>🔴 Maillot à pois</strong><div class="tiny muted">Top 5 des étapes difficiles</div></div></div></div><div class="card"><div class="kicker">Rejoindre le peloton</div><h2>Entre dans la course</h2><div class="field"><label>Ton pseudo</label><input id="name" type="text" maxlength="24" placeholder="Ex. Sébastien"></div><div class="field"><label>Code de salle</label><input id="code" type="text" maxlength="5" placeholder="ABCDE" style="text-transform:uppercase"></div><button id="joinBtn" class="btn-yellow" style="width:100%">Rejoindre la course</button><div id="joinStatus" class="status hidden" style="margin-top:12px"></div><p class="tiny muted">Animateur ? <a href="/admin.html"><strong>Ouvrir la direction de course</strong></a></p></div></section>
 <section id="gameView" class="hidden">
-  <div class="grid grid-3" id="standings"></div>
-  <div class="tiny muted" style="text-align:center;margin-top:8px">⚠ Jaune et vert : classement provisoire tant qu’un joueur n’a pas disputé au moins 50 % des étapes.</div>
-  <div style="height:18px"></div>
-  <div class="card">
-    <div id="waitingView" class="logo-stage"><div><div class="kicker">Prochaine étape</div><h2>En attente du prochain logo…</h2><p class="muted">L'animateur va lancer la prochaine manche.</p></div></div>
-    <div id="roundView" class="logo-stage hidden">
-      <div class="round-wrap">
-        <div id="countdownOverlay" class="countdown-overlay hidden"><div class="kicker">Départ de l'étape</div><div id="countdownNumber" class="countdown-number">3</div><div id="countdownMeta" class="countdown-meta"></div></div>
-        <div id="roundContent">
-          <div class="kicker" id="stageMeta">Logo en course</div>
-          <div class="logo-canvas-shell"><canvas id="logoCanvas" class="logo-canvas" aria-label="Logo à recolorer"></canvas></div>
-          <div id="logoName" class="round-name"></div>
-          <div id="timer" class="timer">20.0</div>
-          <div id="colorControls"><div class="color-area"><input id="colorPicker" class="color-picker" type="color" value="#A6A6A6"><span id="hexReadout" class="hex-readout">#A6A6A6</span><button id="submitColor" class="btn-green">Valider ma couleur</button></div><p class="tiny muted">La zone grise prend ta couleur en direct. Le code HEX fait partie du jeu.</p></div>
-          <div id="locked" class="answer-locked hidden">✅ Réponse enregistrée — attends l'arrivée.</div>
-          <div id="spectatorRound" class="answer-locked hidden">⏳ Tu as rejoint pendant cette étape : tu participeras à la suivante.</div>
-        </div>
-      </div>
-    </div>
-    <div id="resultView" class="logo-stage hidden"><div style="width:100%;max-width:920px">
-      <div class="result-banner">
-        <div class="kicker" style="color:#ffdf00">Arrivée de l'étape</div><h2 id="resultLogo"></h2>
-        <div class="result-swatches"><div><div class="tiny">Ta couleur</div><div id="mySwatch" class="swatch"></div><div id="myHex" class="tiny result-hex">—</div></div><div style="font-size:2rem">→</div><div><div class="tiny">Couleur cible</div><div id="targetSwatch" class="swatch"></div><div id="targetHex" class="tiny result-hex">—</div></div></div>
-        <div id="myResult" style="font-size:1.5rem;font-weight:1000"></div>
-        <div id="resultStats" class="result-stats"></div>
-      </div>
-      <div class="result-logos"><div class="result-logo-card"><div class="tiny">Ton logo</div><div class="result-canvas-shell"><canvas id="resultMyLogoCanvas" class="result-logo-canvas" aria-label="Logo avec ta couleur"></canvas></div></div><div class="result-logo-card"><div class="tiny">Vrai logo</div><div class="result-canvas-shell"><canvas id="resultTrueLogoCanvas" class="result-logo-canvas" aria-label="Logo original"></canvas></div></div></div>
-      <div id="jerseyChanges" class="jersey-changes"></div>
-      <div id="podium" class="podium"></div>
-    </div></div>
-  </div>
-</section>
-<div class="footer-note">Toon Tone Tour · V2.3 · gameplay Tour enrichi · GitHub + Railway</div>
-</main>
-<script src="/socket.io/socket.io.js"></script><script src="/logo-renderer.js"></script><script src="/app.js"></script>
-</body></html>
+<div class="grid grid-3" id="standings"></div><div class="tiny muted" style="text-align:center;margin-top:8px">⚠ Jaune et vert : provisoires tant qu’un joueur n’a pas disputé au moins 50 % des étapes.</div><div style="height:18px"></div>
+<div class="card">
+<div id="waitingView" class="logo-stage"><div><div class="kicker" id="waitingKicker">Prochaine étape</div><h2 id="waitingTitle">En attente du prochain logo…</h2><p id="waitingText" class="muted">L'animateur va lancer la prochaine manche.</p></div></div>
+<div id="roundView" class="logo-stage hidden"><div class="round-wrap"><div id="countdownOverlay" class="countdown-overlay hidden"><div class="kicker">Départ de l'étape</div><div id="countdownNumber" class="countdown-number">3</div><div id="countdownMeta" class="countdown-meta"></div></div><div id="roundContent"><div class="kicker" id="stageMeta">Logo en course</div><div class="logo-canvas-shell"><canvas id="logoCanvas" class="logo-canvas"></canvas></div><div id="logoName" class="round-name"></div><div id="timer" class="timer">20.0</div><div id="colorControls"><div class="tone-picker-layout"><div class="tone-wheel-wrap"><canvas id="toneWheel" class="tone-wheel"></canvas></div><div class="tone-choice"><div class="tiny muted">Ta couleur</div><div id="choicePreview" class="choice-preview"></div><label for="hexInput" class="tiny">Code HEX</label><input id="hexInput" class="hex-input" type="text" value="#A6A6A6" maxlength="7" spellcheck="false"><button id="submitColor" class="btn-green">Valider ma couleur</button><div class="tiny muted">Roue extérieure = teinte · carré = saturation/luminosité.</div></div></div></div><div id="locked" class="answer-locked hidden">✅ Réponse enregistrée — attends l'arrivée.</div><div id="spectatorRound" class="answer-locked hidden">⏳ Tu as rejoint pendant cette étape : tu participeras à la suivante.</div></div></div></div>
+<div id="resultView" class="logo-stage hidden"><div style="width:100%;max-width:920px"><div class="result-banner"><div class="kicker" style="color:#ffdf00">Arrivée de l'étape</div><h2 id="resultLogo"></h2><div class="result-swatches"><div><div class="tiny">Ta couleur</div><div id="mySwatch" class="swatch"></div><div id="myHex" class="tiny result-hex">—</div></div><div style="font-size:2rem">→</div><div><div class="tiny">Couleur cible</div><div id="targetSwatch" class="swatch"></div><div id="targetHex" class="tiny result-hex">—</div></div></div><div id="myResult" style="font-size:1.5rem;font-weight:1000"></div><div id="resultStats" class="result-stats"></div></div><div class="result-logos"><div class="result-logo-card"><div class="tiny">Ton logo</div><div class="result-canvas-shell"><canvas id="resultMyLogoCanvas" class="result-logo-canvas"></canvas></div></div><div class="result-logo-card"><div class="tiny">Vrai logo</div><div class="result-canvas-shell"><canvas id="resultTrueLogoCanvas" class="result-logo-canvas"></canvas></div></div></div><div id="jerseyChanges" class="jersey-changes"></div><div id="podium" class="podium"></div></div></div>
+<div id="finalView" class="hidden final-view"><div class="final-hero"><div class="kicker" style="color:#ffdf00">🏁 Arrivée finale</div><h1 id="finalTourName">Toon Tone Tour</h1><div id="finalWinner" class="final-winner"></div><div id="finalStats" class="result-stats"></div></div><div id="finalJerseys" class="final-jerseys"></div><div class="card"><div class="section-title"><h2>Récompenses du Tour</h2></div><div id="finalAwards" class="awards-grid"></div></div><button id="backToPeloton" class="btn-primary" style="margin-top:18px">Retour au peloton</button></div>
+</div></section>
+<div class="footer-note">Toon Tone Tour · V3.0 · Tours, roue chromatique & podium final · GitHub + Railway</div></main>
+<script src="/socket.io/socket.io.js"></script><script src="/logo-renderer.js"></script><script src="/color-picker.js"></script><script src="/app.js"></script></body></html>

@@ -1,176 +1,50 @@
-const socket = io();
-const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
-let me = { id: localStorage.getItem('ttt-player-id'), name: localStorage.getItem('ttt-name') || '' };
-let state = null, tickTimer = null, activeRoundId = null, lastRoundResult = null;
-let roundRenderer = null, renderedRoundId = null, hasPickedColor = false, submittedThisRound = false;
+const socket=io();
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+let me={id:localStorage.getItem('ttt-player-id'),name:localStorage.getItem('ttt-name')||''};
+let state=null,tickTimer=null,activeRoundId=null,lastRoundResult=null,roundRenderer=null,renderedRoundId=null,hasPickedColor=false,submittedThisRound=false,finalSummary=null;
+let currentColor='#A6A6A6';
 
-$('name').value = me.name;
-const roomFromUrl = new URLSearchParams(location.search).get('room');
-$('code').value = (roomFromUrl || localStorage.getItem('ttt-room-code') || '').toUpperCase();
+$('name').value=me.name;const roomFromUrl=new URLSearchParams(location.search).get('room');$('code').value=(roomFromUrl||localStorage.getItem('ttt-room-code')||'').toUpperCase();
+const tonePicker=ToneColorPicker.create($('toneWheel'),{onChange:hex=>setColor(hex,true)});
+tonePicker.setHex(currentColor,true);setColor(currentColor,false);
 
-function ms(ms){ return (ms/1000).toFixed(1)+' s'; }
-function qualNote(p){ return !p.qualified && p.totalRounds ? `<span class="qual-note">⚠ ${p.playedRounds}/${p.totalRounds}</span>` : ''; }
-function standingsHtml(type, title, rows, scoreFn){
-  return `<div class="jersey ${type}"><h3>${title}</h3>${rows.slice(0,7).map((p,i)=>`<div class="rank-row ${!p.qualified && type!=='polka'?'provisional':''}"><div class="rank-num">${i+1}</div><div class="rank-name">${esc(p.name)}${p.online?'<span class="online-dot"></span>':''}</div><div class="rank-score">${scoreFn(p)}</div></div>`).join('') || '<div class="muted tiny">Pas encore de classement.</div>'}</div>`;
+function ms(v){return (v/1000).toFixed(1)+' s';}
+function ordinal(n){return n===1?'1er':`${n}e`;}
+function qualNote(p){return !p.qualified&&p.totalRounds?`<span class="qual-note">⚠ ${p.playedRounds}/${p.totalRounds}</span>`:'';}
+function standingsHtml(type,title,rows,scoreFn){return `<div class="jersey ${type}"><h3>${title}</h3>${rows.slice(0,7).map((p,i)=>`<div class="rank-row ${!p.qualified&&type!=='polka'?'provisional':''}"><div class="rank-num">${i+1}</div><div class="rank-name">${esc(p.name)}${p.online?'<span class="online-dot"></span>':''}</div><div class="rank-score">${scoreFn(p)}</div></div>`).join('')||'<div class="muted tiny">Pas encore de classement.</div>'}</div>`;}
+function renderStandings(){if(!state)return;$('standings').innerHTML=standingsHtml('yellow','🟨 Maillot jaune',state.standings.yellow,p=>p.yellowCount?`${p.yellowAvg.toFixed(1)}%${qualNote(p)}`:'—')+standingsHtml('green','🟩 Maillot vert',state.standings.green,p=>p.yellowCount?`${ms(p.greenAdjusted)}${qualNote(p)}`:'—')+standingsHtml('polka','🔴 Maillot à pois',state.standings.polka,p=>`${p.mountainPoints} pts`);}
+function enterGame(){$('joinView').classList.add('hidden');$('gameView').classList.remove('hidden');}
+function showStatus(msg,bad=false){$('joinStatus').textContent=msg;$('joinStatus').className='status '+(bad?'error':'success');}
+function setColor(hex,fromPicker=false){
+  if(!/^#[0-9A-F]{6}$/i.test(hex))return;
+  currentColor=hex.toUpperCase();hasPickedColor=true;$('hexInput').value=currentColor;$('choicePreview').style.background=currentColor;
+  if(!fromPicker)tonePicker.setHex(currentColor,true);if(roundRenderer)roundRenderer.render(currentColor);
 }
-function renderStandings(){
-  if(!state) return;
-  $('standings').innerHTML =
-    standingsHtml('yellow','🟨 Maillot jaune',state.standings.yellow,p=>p.yellowCount?`${p.yellowAvg.toFixed(1)}%${qualNote(p)}`:'—') +
-    standingsHtml('green','🟩 Maillot vert',state.standings.green,p=>p.yellowCount?`${ms(p.greenAdjusted)}${qualNote(p)}`:'—') +
-    standingsHtml('polka','🔴 Maillot à pois',state.standings.polka,p=>`${p.mountainPoints} pts`);
+async function prepareRoundLogo(r){if(renderedRoundId===r.id&&roundRenderer)return;renderedRoundId=r.id;roundRenderer=null;try{roundRenderer=await LogoTone.create($('logoCanvas'),r.logoImage,r.targetColor,r.colorTolerance||42);if(renderedRoundId!==r.id)return;roundRenderer.render(hasPickedColor?currentColor:null);}catch(e){console.error(e);}}
+function setPlayControls(r){const participant=(r.participantIds||[]).includes(me.id),answered=submittedThisRound||(r.answeredPlayerIds||[]).includes(me.id);$('spectatorRound').classList.toggle('hidden',participant);$('colorControls').classList.toggle('hidden',!participant||answered);$('locked').classList.toggle('hidden',!participant||!answered);}
+function roundLabel(r){if(r.tourStageNumber)return `ÉTAPE ${r.tourStageNumber}/${r.tourStageCount}`;return `ÉTAPE ${r.roundNumber}`;}
+function startTicker(r){clearInterval(tickTimer);const draw=()=>{const now=Date.now();if(now<r.startedAt){const n=Math.max(1,Math.ceil((r.startedAt-now)/1000));$('countdownOverlay').classList.remove('hidden');$('countdownNumber').textContent=n;$('countdownMeta').textContent=`${roundLabel(r)} · ${r.difficultyEmoji||'🏔️'} ${r.difficultyLabel||''} · ${r.difficultyPoints||0} pts`;$('roundContent').classList.add('countdown-hidden');$('timer').textContent='—';return;}$('countdownOverlay').classList.add('hidden');$('roundContent').classList.remove('countdown-hidden');setPlayControls(r);const left=Math.max(0,r.endsAt-now);$('timer').textContent=(left/1000).toFixed(1);if(left<=0)clearInterval(tickTimer);};draw();tickTimer=setInterval(draw,100);}
+function renderWaiting(){if(!state)return;const t=state.activeTour;if(t){$('waitingKicker').textContent='Tour en cours';$('waitingTitle').textContent=t.name;if(t.currentIndex<t.totalStages)$('waitingText').textContent=`Étape ${t.currentIndex+1}/${t.totalStages} prête : ${t.nextLogoName||'prochain logo'}. ${t.autoAdvance?'Départ automatique…':'La direction de course donnera le départ.'}`;else $('waitingText').textContent='Toutes les étapes sont terminées. Classement final en préparation…';}else{$('waitingKicker').textContent='Prochaine étape';$('waitingTitle').textContent='En attente du prochain logo…';$('waitingText').textContent="L'animateur va lancer la prochaine manche.";}}
+function hideMainViews(){$('waitingView').classList.add('hidden');$('roundView').classList.add('hidden');$('resultView').classList.add('hidden');}
+function renderState(next){state=next;$('roomPill').textContent='Salle '+next.roomCode;renderStandings();if(me.id&&next.players.some(p=>p.id===me.id))enterGame();if(finalSummary)return;
+  if(next.activeRound){const r=next.activeRound;if(activeRoundId!==r.id)submittedThisRound=false;activeRoundId=r.id;$('waitingView').classList.add('hidden');$('resultView').classList.add('hidden');$('roundView').classList.remove('hidden');$('logoName').textContent=r.logoName;$('stageMeta').textContent=`${roundLabel(r)} · ${r.difficultyEmoji||'🏔️'} ${r.difficultyLabel||''} · ${r.difficultyPoints||0} pts montagne${r.tourName?` · ${r.tourName}`:''}`;if(renderedRoundId!==r.id){hasPickedColor=false;currentColor='#A6A6A6';tonePicker.setHex(currentColor,true);$('hexInput').value=currentColor;$('choicePreview').style.background=currentColor;prepareRoundLogo(r);}setPlayControls(r);startTicker(r);
+  }else if(!lastRoundResult){activeRoundId=null;renderedRoundId=null;roundRenderer=null;hasPickedColor=false;submittedThisRound=false;clearInterval(tickTimer);$('roundView').classList.add('hidden');$('resultView').classList.add('hidden');$('waitingView').classList.remove('hidden');renderWaiting();}
+  const seen=localStorage.getItem('ttt-seen-summary');if(!next.activeRound&&!next.activeTour&&next.lastTourSummary&&next.lastTourSummary.id!==seen&&!lastRoundResult)showFinal(next.lastTourSummary);
 }
-function enterGame(){ $('joinView').classList.add('hidden'); $('gameView').classList.remove('hidden'); }
-function showStatus(msg,bad=false){ $('joinStatus').textContent=msg; $('joinStatus').className='status '+(bad?'error':'success'); }
+async function renderResultLogos(hist,myColor){try{if(!hist?.logoImage)return;const tol=hist.colorTolerance||42;const mine=await LogoTone.create($('resultMyLogoCanvas'),hist.logoImage,hist.targetColor,tol);mine.render(myColor||null);const real=await LogoTone.create($('resultTrueLogoCanvas'),hist.logoImage,hist.targetColor,tol);real.renderOriginal();}catch(e){console.error(e);}}
+function renderJerseyChanges(hist){const changes=(hist.leaderChanges||[]).filter(c=>c.changed&&c.after);$('jerseyChanges').innerHTML=changes.map((c,i)=>`<div class="jersey-change ${c.jersey}" style="animation-delay:${i*.14}s"><div class="jersey-change-icon">${c.emoji}</div><div><strong>${esc(c.after.name)}</strong> ${c.before?'prend':'endosse'} le <strong>${esc(c.label.toLowerCase())}</strong>${c.before?` à ${esc(c.before.name)}`:''} !</div></div>`).join('');}
+function finalJersey(type,title,rows,score){return `<div class="final-jersey jersey ${type}"><h3>${title}</h3>${rows.slice(0,5).map((p,i)=>`<div class="rank-row"><div class="rank-num">${i+1}</div><div class="rank-name">${esc(p.name)}</div><div class="rank-score">${score(p)}</div></div>`).join('')}</div>`;}
+function showFinal(summary){if(!summary)return;finalSummary=summary;lastRoundResult=null;clearInterval(tickTimer);hideMainViews();$('finalView').classList.remove('hidden');$('finalTourName').textContent=summary.name||'Toon Tone Tour';const yellow=summary.standings?.yellow||[],green=summary.standings?.green||[],polka=summary.standings?.polka||[],winner=yellow.find(p=>p.qualified)||yellow[0];$('finalWinner').innerHTML=winner?`<div class="trophy">🏆</div><div><div class="tiny">VAINQUEUR GÉNÉRAL</div><strong>${esc(winner.name)}</strong><div>${winner.yellowAvg.toFixed(1)} % de proximité moyenne</div></div>`:'<strong>Tour terminé</strong>';$('finalStats').innerHTML=`<span>🏁 <strong>${summary.completedStages}/${summary.totalStages}</strong> étapes</span><span>👥 <strong>${summary.stats?.players||0}</strong> joueurs</span><span>🎨 <strong>${(summary.stats?.averageProximity||0).toFixed(1)}%</strong> moyenne</span>${summary.stats?.hardestLogo?`<span>🏔️ ${esc(summary.stats.hardestLogo.name)} · <strong>${summary.stats.hardestLogo.points} pts</strong></span>`:''}`;$('finalJerseys').innerHTML=finalJersey('yellow','🟨 Classement général',yellow,p=>`${p.yellowAvg.toFixed(1)}%`)+finalJersey('green','🟩 Classement sprint',green,p=>ms(p.greenAdjusted))+finalJersey('polka','🔴 Classement montagne',polka,p=>`${p.mountainPoints} pts`);$('finalAwards').innerHTML=(summary.awards||[]).map(a=>`<div class="award-card"><div class="award-icon">${a.emoji}</div><div><div class="tiny muted">${esc(a.title)}</div><strong>${esc(a.name)}</strong><div class="tiny">${esc(a.detail)}</div></div></div>`).join('')||'<div class="muted">Pas assez de données pour les récompenses.</div>';window.scrollTo({top:0,behavior:'smooth'});}
 
-async function prepareRoundLogo(r){
-  if(renderedRoundId===r.id && roundRenderer) return;
-  renderedRoundId=r.id;
-  roundRenderer=null;
-  try{
-    roundRenderer=await LogoTone.create($('logoCanvas'),r.logoImage,r.targetColor,r.colorTolerance||42);
-    if(renderedRoundId!==r.id) return;
-    roundRenderer.render(hasPickedColor ? $('colorPicker').value : null);
-  }catch(e){ console.error(e); }
-}
-
-function setPlayControls(r){
-  const participant = (r.participantIds || []).includes(me.id);
-  const answered = submittedThisRound || (r.answeredPlayerIds || []).includes(me.id);
-  $('spectatorRound').classList.toggle('hidden', participant);
-  $('colorControls').classList.toggle('hidden', !participant || answered);
-  $('locked').classList.toggle('hidden', !participant || !answered);
-}
-
-function startTicker(r){
-  clearInterval(tickTimer);
-  const draw=()=>{
-    const now=Date.now();
-    if(now < r.startedAt){
-      const n=Math.max(1,Math.ceil((r.startedAt-now)/1000));
-      $('countdownOverlay').classList.remove('hidden');
-      $('countdownNumber').textContent=n;
-      $('countdownMeta').textContent=`Étape ${r.roundNumber} · ${r.difficultyEmoji||'🏔️'} ${r.difficultyLabel||''} · ${r.difficultyPoints||0} pts`;
-      $('roundContent').classList.add('countdown-hidden');
-      $('timer').textContent='—';
-      return;
-    }
-    $('countdownOverlay').classList.add('hidden');
-    $('roundContent').classList.remove('countdown-hidden');
-    setPlayControls(r);
-    const left=Math.max(0,r.endsAt-now);
-    $('timer').textContent=(left/1000).toFixed(1);
-    if(left<=0) clearInterval(tickTimer);
-  };
-  draw(); tickTimer=setInterval(draw,100);
-}
-
-function renderState(next){
-  state=next;
-  $('roomPill').textContent='Salle '+next.roomCode;
-  renderStandings();
-  if(me.id && next.players.some(p=>p.id===me.id)) enterGame();
-  if(next.activeRound){
-    const r=next.activeRound;
-    if(activeRoundId!==r.id){ submittedThisRound=false; }
-    activeRoundId=r.id;
-    $('waitingView').classList.add('hidden'); $('resultView').classList.add('hidden'); $('roundView').classList.remove('hidden');
-    $('logoName').textContent=r.logoName;
-    $('stageMeta').textContent=`ÉTAPE ${r.roundNumber} · ${r.difficultyEmoji||'🏔️'} ${r.difficultyLabel||''} · ${r.difficultyPoints||0} pts montagne`;
-    if(renderedRoundId!==r.id){
-      hasPickedColor=false; $('colorPicker').value='#A6A6A6'; $('hexReadout').textContent='#A6A6A6';
-      prepareRoundLogo(r);
-    }
-    setPlayControls(r);
-    startTicker(r);
-  } else if(!lastRoundResult){
-    activeRoundId=null; renderedRoundId=null; roundRenderer=null; hasPickedColor=false; submittedThisRound=false;
-    clearInterval(tickTimer);
-    $('roundView').classList.add('hidden'); $('resultView').classList.add('hidden'); $('waitingView').classList.remove('hidden');
-  }
-}
-
-async function renderResultLogos(hist, myColor){
-  try{
-    const myCanvas = $('resultMyLogoCanvas');
-    const trueCanvas = $('resultTrueLogoCanvas');
-    if(!hist?.logoImage || !myCanvas || !trueCanvas) return;
-    const tol = hist.colorTolerance || 42;
-    const mineRenderer = await LogoTone.create(myCanvas, hist.logoImage, hist.targetColor, tol);
-    mineRenderer.render(myColor || null);
-    const trueRenderer = await LogoTone.create(trueCanvas, hist.logoImage, hist.targetColor, tol);
-    trueRenderer.renderOriginal();
-  }catch(e){ console.error("Impossible d'afficher les logos de résultat", e); }
-}
-
-function renderJerseyChanges(hist){
-  const changes=(hist.leaderChanges||[]).filter(c=>c.changed && c.after);
-  $('jerseyChanges').innerHTML=changes.map((c,i)=>`<div class="jersey-change ${c.jersey}" style="animation-delay:${i*.14}s"><div class="jersey-change-icon">${c.emoji}</div><div><strong>${esc(c.after.name)}</strong> ${c.before?'prend':'endosse'} le <strong>${esc(c.label.toLowerCase())}</strong>${c.before?` à ${esc(c.before.name)}`:''} !</div></div>`).join('');
-}
-
-$('joinBtn').onclick=()=>{
-  const name=$('name').value.trim(), roomCode=$('code').value.trim().toUpperCase();
-  socket.emit('join',{name,playerId:me.id,roomCode},res=>{
-    if(!res.ok) return showStatus(res.error,true);
-    me.id=res.playerId; me.name=name;
-    localStorage.setItem('ttt-player-id',me.id); localStorage.setItem('ttt-name',name); localStorage.setItem('ttt-room-code',res.roomCode);
-    enterGame();
-    if(res.waitNextRound) showStatus('Tu es dans la salle : la manche en cours est déjà partie, tu joueras la suivante.');
-  });
-};
+$('joinBtn').onclick=()=>{const name=$('name').value.trim(),roomCode=$('code').value.trim().toUpperCase();socket.emit('join',{name,playerId:me.id,roomCode},res=>{if(!res.ok)return showStatus(res.error,true);me.id=res.playerId;me.name=name;localStorage.setItem('ttt-player-id',me.id);localStorage.setItem('ttt-name',name);localStorage.setItem('ttt-room-code',res.roomCode);enterGame();if(res.waitNextRound)showStatus('Tu es dans la salle : la manche en cours est déjà partie, tu joueras la suivante.');});};
 $('code').addEventListener('input',e=>e.target.value=e.target.value.toUpperCase());
-$('colorPicker').addEventListener('input',e=>{
-  const color=e.target.value.toUpperCase();
-  hasPickedColor=true; $('hexReadout').textContent=color;
-  if(roundRenderer) roundRenderer.render(color);
-});
-$('submitColor').onclick=()=>{
-  if(!activeRoundId) return;
-  $('submitColor').disabled=true;
-  socket.emit('submit-color',{roundId:activeRoundId,color:$('colorPicker').value},res=>{
-    $('submitColor').disabled=false;
-    if(!res.ok) return alert(res.error);
-    submittedThisRound=true;
-    $('colorControls').classList.add('hidden'); $('locked').classList.remove('hidden');
-  });
-};
+$('hexInput').addEventListener('input',e=>{let v=e.target.value.toUpperCase();if(!v.startsWith('#'))v='#'+v;e.target.value=v;if(/^#[0-9A-F]{6}$/.test(v))setColor(v,false);});
+$('hexInput').addEventListener('blur',()=>{$('hexInput').value=currentColor;});
+$('submitColor').onclick=()=>{if(!activeRoundId)return;$('submitColor').disabled=true;socket.emit('submit-color',{roundId:activeRoundId,color:currentColor},res=>{$('submitColor').disabled=false;if(!res.ok)return alert(res.error);submittedThisRound=true;$('colorControls').classList.add('hidden');$('locked').classList.remove('hidden');});};
+$('backToPeloton').onclick=()=>{if(finalSummary)localStorage.setItem('ttt-seen-summary',finalSummary.id);finalSummary=null;$('finalView').classList.add('hidden');$('waitingView').classList.remove('hidden');renderWaiting();};
 
-socket.on('state', renderState);
-socket.on('round-ended', hist=>{
-  lastRoundResult=hist; activeRoundId=null; clearInterval(tickTimer);
-  $('roundView').classList.add('hidden'); $('waitingView').classList.add('hidden'); $('resultView').classList.remove('hidden');
-  $('resultLogo').textContent=`Étape ${hist.roundNumber} · ${hist.logoName} · ${hist.difficultyEmoji||'🏔️'} ${hist.difficultyLabel||''}`;
-  const mine=hist.results.find(r=>r.playerId===me.id);
-  const winner=hist.results[0];
-  $('targetSwatch').style.background=hist.targetColor;
-  $('targetHex').textContent=hist.targetColor;
-  $('mySwatch').style.background=mine?.color || '#777';
-  $('myHex').textContent=mine?.color || '—';
-  $('myResult').textContent=mine?.color?`${mine.proximity.toFixed(1)} % de proximité · ${ms(mine.elapsedMs)}`:'Pas de réponse sur cette manche.';
-
-  const stats=[];
-  if(mine){
-    stats.push(`<span>🏁 <strong>${mine.roundRank}e</strong> / ${hist.participantCount}</span>`);
-    if(mine.mountainGain) stats.push(`<span>🏔️ <strong>+${mine.mountainGain} pts</strong></span>`);
-    else stats.push('<span>🏔️ +0 pt</span>');
-    if(mine.color && winner) stats.push(`<span>🎯 Écart vainqueur <strong>-${Math.max(0,winner.proximity-mine.proximity).toFixed(1)} pt</strong></span>`);
-    if(mine.yellowRankDelta>0) stats.push(`<span>📈 <strong>+${mine.yellowRankDelta} place${mine.yellowRankDelta>1?'s':''}</strong> au jaune</span>`);
-    if(mine.yellowRankDelta<0) stats.push(`<span>📉 <strong>${mine.yellowRankDelta} place${mine.yellowRankDelta<-1?'s':''}</strong> au jaune</span>`);
-    if(mine.yellowRankDelta===0 && mine.yellowRankAfter) stats.push(`<span>🟨 <strong>${mine.yellowRankAfter}e</strong> au général</span>`);
-  }
-  $('resultStats').innerHTML=stats.join('');
-  renderResultLogos(hist, mine?.color || null);
-  renderJerseyChanges(hist);
-  $('podium').innerHTML=hist.results.slice(0,3).map((r,i)=>`<div class="${i===0?'first':i===1?'second':'third'}"><div>${['🥇','🥈','🥉'][i]}</div><div>${esc(r.name)}</div><div>${r.proximity.toFixed(1)}%</div><div class="tiny">${ms(r.elapsedMs)}${r.mountainGain?` · +${r.mountainGain} 🏔️`:''}</div></div>`).join('');
-  setTimeout(()=>{
-    if(!state?.activeRound){
-      lastRoundResult=null; renderedRoundId=null; roundRenderer=null; hasPickedColor=false; submittedThisRound=false;
-      $('resultView').classList.add('hidden'); $('waitingView').classList.remove('hidden');
-    }
-  },9000);
-});
-
-if(me.id && me.name && $('code').value){
-  socket.emit('join',{name:me.name,playerId:me.id,roomCode:$('code').value},res=>{ if(res.ok) enterGame(); });
-}
+socket.on('state',renderState);
+socket.on('round-ended',hist=>{lastRoundResult=hist;activeRoundId=null;clearInterval(tickTimer);$('roundView').classList.add('hidden');$('waitingView').classList.add('hidden');$('finalView').classList.add('hidden');$('resultView').classList.remove('hidden');const stage=hist.tourStageNumber?`Étape ${hist.tourStageNumber}/${hist.tourStageCount}`:`Étape ${hist.roundNumber}`;$('resultLogo').textContent=`${stage} · ${hist.logoName} · ${hist.difficultyEmoji||'🏔️'} ${hist.difficultyLabel||''}`;const mine=hist.results.find(r=>r.playerId===me.id),winner=hist.results[0];$('targetSwatch').style.background=hist.targetColor;$('targetHex').textContent=hist.targetColor;$('mySwatch').style.background=mine?.color||'#777';$('myHex').textContent=mine?.color||'—';$('myResult').textContent=mine?.color?`${mine.proximity.toFixed(1)} % de proximité · ${ms(mine.elapsedMs)}`:'Pas de réponse sur cette manche.';const stats=[];if(mine){stats.push(`<span>🏁 <strong>${ordinal(mine.roundRank)}</strong> / ${hist.participantCount}</span>`);stats.push(`<span>🏔️ <strong>+${mine.mountainGain||0} pt${mine.mountainGain>1?'s':''}</strong></span>`);if(mine.color&&winner)stats.push(`<span>🎯 Écart vainqueur <strong>-${Math.max(0,winner.proximity-mine.proximity).toFixed(1)} pt</strong></span>`);if(mine.yellowRankDelta>0)stats.push(`<span>📈 <strong>+${mine.yellowRankDelta} place${mine.yellowRankDelta>1?'s':''}</strong> au jaune</span>`);else if(mine.yellowRankDelta<0)stats.push(`<span>📉 <strong>${mine.yellowRankDelta} place${mine.yellowRankDelta<-1?'s':''}</strong> au jaune</span>`);else if(mine.yellowRankAfter)stats.push(`<span>🟨 <strong>${ordinal(mine.yellowRankAfter)}</strong> au général</span>`);}$('resultStats').innerHTML=stats.join('');renderResultLogos(hist,mine?.color||null);renderJerseyChanges(hist);$('podium').innerHTML=hist.results.slice(0,3).map((r,i)=>`<div class="${i===0?'first':i===1?'second':'third'}"><div>${['🥇','🥈','🥉'][i]}</div><div>${esc(r.name)}</div><div>${r.proximity.toFixed(1)}%</div><div class="tiny">${ms(r.elapsedMs)}${r.mountainGain?` · +${r.mountainGain} 🏔️`:''}</div></div>`).join('');setTimeout(()=>{if(!state?.activeRound&&!finalSummary){lastRoundResult=null;renderedRoundId=null;roundRenderer=null;hasPickedColor=false;submittedThisRound=false;$('resultView').classList.add('hidden');$('waitingView').classList.remove('hidden');renderWaiting();}},12000);});
+socket.on('tour-ended',summary=>showFinal(summary));
+if(me.id&&me.name&&$('code').value)socket.emit('join',{name:me.name,playerId:me.id,roomCode:$('code').value},res=>{if(res.ok)enterGame();});

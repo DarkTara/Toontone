@@ -1,8 +1,8 @@
 {
   "name": "toon-tone-tour",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Jeu multijoueur de couleurs de logos façon Tour de France",
+  "description": "Jeu multijoueur de couleurs de logos façon Tour de France — V3 Grand Tour",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

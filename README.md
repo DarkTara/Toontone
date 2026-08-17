@@ -1,11 +1,23 @@
-# Toon Tone Tour V2.3
+# Toon Tone Tour V3.0 🚲🎨
 
-Jeu multijoueur temps réel de reconnaissance de couleurs de logos, avec une identité visuelle inspirée du Tour de France.
+Jeu multijoueur temps réel inspiré de Toon Tone, avec une identité Tour de France. Déploiement prévu sur **GitHub + Railway**.
 
-## Nouveautés V2.3
+## Nouveautés V3
 
-### Difficulté montagne automatique
-Chaque logo reçoit une catégorie :
+- **Roue chromatique personnalisée** avec carré saturation/luminosité.
+- Le **code HEX reste visible et éditable** pendant la manche.
+- **Tours / playlists** : crée un parcours nommé, ajoute les logos dans l’ordre souhaité et déplace-les avec ↑ / ↓.
+- Enchaînement **manuel ou automatique** des étapes.
+- Délai de résultats configurable entre deux étapes.
+- **Écran final** avec podiums jaune, vert et pois.
+- Récompenses de fin de Tour : Œil de lynx, Sprinteur, Régularité, Remontada et Grimpeur.
+- Statistiques finales : nombre d’étapes, joueurs, proximité moyenne et étape la plus montagneuse.
+- Import/export d’un **pack JSON** contenant logos et Tours.
+- Toutes les fonctions V2.3 sont conservées : recoloration sélective, comparaison des logos, Top 5 montagne, difficulté automatique, joueurs tardifs, 3–2–1 et changements de maillot.
+
+## Maillot à pois
+
+Catégories :
 
 - 🟢 Facile : 2 pts
 - 🔵 Moyen : 5 pts
@@ -13,88 +25,48 @@ Chaque logo reçoit une catégorie :
 - 🔴 Très difficile : 15 pts
 - ⚫ Hors catégorie : 20 pts
 
-L'estimation utilise :
-- la notoriété de la marque ;
-- la part visible du logo correspondant à la couleur cible ;
-- le rôle de cette couleur dans le logo ;
-- le caractère emblématique ou générique de la teinte.
+Top 5 de chaque étape : **100 % / 75 % / 50 % / 30 % / 15 %** de la valeur de l’étape, arrondie au point le plus proche avec un minimum de 1 point.
 
-La catégorie peut être forcée manuellement par l'animateur.
-
-### Nouveau maillot à pois Top 5
-Sur chaque logo, les cinq meilleurs joueurs ayant répondu marquent :
-
-- 1er : 100 % des points du logo
-- 2e : 75 %
-- 3e : 50 %
-- 4e : 30 %
-- 5e : 15 %
-
-Les points sont arrondis avec `Math.round`, avec un minimum de 1 point pour un joueur du Top 5.
-
-### Équité pour les joueurs qui arrivent en retard
-- Une manche mémorise la liste des joueurs présents au départ.
-- Un joueur qui rejoint pendant une manche attend la suivante.
-- Les classements jaune et vert sont considérés comme officiels à partir de 50 % des manches disputées.
-- Pour le maillot vert, les manches ratées sont comptées comme le temps maximal de la manche : un joueur qui arrive tard ne gagne donc pas artificiellement grâce à un petit temps cumulé.
-
-### Départ 3… 2… 1…
-Chaque étape commence par un compte à rebours de 3 secondes. Le logo n'est visible qu'au départ.
-
-### Résultats enrichis
-La page joueur affiche désormais :
-- la couleur choisie et son code HEX ;
-- la vraie couleur et son code HEX ;
-- le logo réalisé par le joueur ;
-- le vrai logo original ;
-- le rang sur la manche ;
-- le nombre de points montagne gagnés ;
-- l'écart avec le vainqueur ;
-- l'évolution au classement jaune ;
-- les changements de détenteurs de maillots.
-
-### Édition des logos
-Depuis l'espace animateur, un logo existant peut être modifié : nom, image, couleur cible, tolérance et paramètres de difficulté.
-
-## Installation locale
-
-```bash
-npm install
-npm start
-```
-
-Puis ouvrir :
-- Joueurs : `http://localhost:3000`
-- Animateur : `http://localhost:3000/admin.html`
-
-Mot de passe admin par défaut : `admin`.
-
-## Railway
+## Déploiement Railway
 
 Variables recommandées :
 
 ```text
-ADMIN_PASSWORD=un_mot_de_passe_solide
+ADMIN_PASSWORD=un_vrai_mot_de_passe
 DATA_DIR=/data
 ROUND_SECONDS=20
 ```
 
-Ajoute un volume Railway monté sur `/data` pour conserver logos, joueurs et classements après redéploiement.
+Ajoute un volume Railway monté sur `/data` afin de conserver les logos, Tours, joueurs et scores entre les redéploiements.
 
-## Vérification de version
-
-Ouvre :
+Le projet doit être placé **directement à la racine du dépôt GitHub** :
 
 ```text
-https://TON-APP.up.railway.app/version
+/
+├── server.js
+├── package.json
+├── railway.json
+├── README.md
+├── VERSION.txt
+└── public/
+    ├── index.html
+    ├── admin.html
+    ├── app.js
+    ├── admin.js
+    ├── logo-renderer.js
+    ├── color-picker.js
+    └── styles.css
 ```
 
-La réponse doit contenir :
+Après déploiement, `/version` doit retourner `3.0.0`.
 
-```json
-{
-  "version": "2.3.0",
-  "selectiveRecolor": true,
-  "gameplay23": true
-}
-```
+## Utilisation rapide
+
+1. Ouvre `/admin.html` et connecte-toi.
+2. Ajoute tes logos et sélectionne la couleur cible dans l’aperçu.
+3. Crée un Tour, ajoute les logos dans l’ordre souhaité et enregistre.
+4. Choisis le temps par étape, le délai d’affichage des résultats et le mode manuel/auto.
+5. Lance le Tour.
+6. À la fin, tous les joueurs voient automatiquement le classement final.
+
+Tu peux toujours utiliser le **mode libre** pour lancer un logo sans créer de Tour.
