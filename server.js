@@ -18,7 +18,7 @@ const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : pat
 const DATA_FILE = path.join(DATA_DIR, 'game-state.json');
 const DEFAULT_ROUND_SECONDS = Number(process.env.ROUND_SECONDS || 20);
 const COUNTDOWN_MS = 3000;
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 
 const DIFFICULTY_CATEGORIES = {
   easy:      { key:'easy',      label:'Facile',         emoji:'🟢', points:2 },
@@ -38,7 +38,12 @@ app.get('/version', (_, res) => res.json({
   finalPodium: true,
   fullStageRanking: true,
   answerExplorer: true,
-  extendedStats: true
+  extendedStats: true,
+  secureClientAnswer: true,
+  scoringModel: 'CIEDE2000',
+  tourHistory: true,
+  difficultyCalibration: true,
+  tourAnimations: true
 }));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -67,6 +72,7 @@ function defaultState() {
     activeRound: null,
     activeTour: null,
     lastTourSummary: null,
+    tourHistory: [],
     roundHistory: [],
     settings: { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10 },
     createdAt: Date.now()
@@ -95,7 +101,16 @@ function normalizeLogo(l) {
     notoriety: l?.notoriety || 'known',
     colorImportance: l?.colorImportance || 'secondary',
     colorDistinctiveness: l?.colorDistinctiveness || 'distinctive',
-    targetAreaRatio: clamp(Number(l?.targetAreaRatio) || 0, 0, 1)
+    targetAreaRatio: clamp(Number(l?.targetAreaRatio) || 0, 0, 1),
+    playImage: typeof l?.playImage === 'string' ? l.playImage : null,
+    maskBits: typeof l?.maskBits === 'string' ? l.maskBits : null,
+    maskWidth: Number(l?.maskWidth) || 0,
+    maskHeight: Number(l?.maskHeight) || 0,
+    secureAssetsVersion: Number(l?.secureAssetsVersion) || 0,
+    calibrationRounds: Number(l?.calibrationRounds) || 0,
+    calibrationAnswers: Number(l?.calibrationAnswers) || 0,
+    calibrationProximityTotal: Number(l?.calibrationProximityTotal) || 0,
+    calibrationUpdatedAt: Number(l?.calibrationUpdatedAt) || null
   };
 }
 function normalizeTour(t) {
@@ -123,6 +138,7 @@ function loadState() {
       loaded.roundHistory ||= [];
       loaded.players ||= {};
       loaded.lastTourSummary ||= null;
+      loaded.tourHistory = Array.isArray(loaded.tourHistory) ? loaded.tourHistory.slice(-50) : [];
       const totalDuration = loaded.roundHistory.reduce((sum, h) => sum + historyDurationMs(h, loaded.settings), 0);
       Object.values(loaded.players).forEach(p => {
         p.yellowTotal = Number(p.yellowTotal) || 0;
@@ -210,9 +226,11 @@ function basicSnapshot() {
     lastTourSummary: state.lastTourSummary,
     activeRound: state.activeRound ? {
       id: state.activeRound.id, logoId: state.activeRound.logoId,
-      logoName: state.activeRound.logoName, logoImage: state.activeRound.logoImage,
-      targetColor: state.activeRound.targetColor,
-      colorTolerance: state.activeRound.colorTolerance || 42,
+      logoName: state.activeRound.logoName,
+      playImage: state.activeRound.playImage,
+      maskBits: state.activeRound.maskBits,
+      maskWidth: state.activeRound.maskWidth,
+      maskHeight: state.activeRound.maskHeight,
       difficultyCategory: state.activeRound.difficultyCategory,
       difficultyLabel: state.activeRound.difficultyLabel,
       difficultyEmoji: state.activeRound.difficultyEmoji,
@@ -234,9 +252,10 @@ function basicSnapshot() {
 function adminSnapshot() {
   return {
     ...basicSnapshot(),
-    logos: state.logos.map(l => ({ ...l })),
+    logos: state.logos.map(l => ({ ...l, calibration: calibrationForLogo(l), secureReady: hasSecureAssets(l) })),
     tours: state.tours.map(publicTour),
-    roundHistory: state.roundHistory.slice(-50).reverse()
+    roundHistory: state.roundHistory.slice(-50).reverse(),
+    tourHistory: state.tourHistory.slice(-50).reverse()
   };
 }
 function emitState() {
@@ -259,14 +278,49 @@ function rgbToLab({r,g,b}) {
   x=f(x);y=f(y);z=f(z);
   return {L:116*y-16,a:500*(x-y),b:200*(y-z)};
 }
-function proximityPct(aHex,bHex) {
-  const a=hexToRgb(aHex), b=hexToRgb(bHex); if(!a||!b) return 0;
-  const la=rgbToLab(a), lb=rgbToLab(b);
-  const dE=Math.sqrt((la.L-lb.L)**2+(la.a-lb.a)**2+(la.b-lb.b)**2);
-  return Math.max(0,Math.min(100,100-dE));
+function deg2rad(d){return d*Math.PI/180;}
+function rad2deg(r){return r*180/Math.PI;}
+function deltaE2000(lab1,lab2){
+  const L1=lab1.L,a1=lab1.a,b1=lab1.b,L2=lab2.L,a2=lab2.a,b2=lab2.b;
+  const C1=Math.sqrt(a1*a1+b1*b1),C2=Math.sqrt(a2*a2+b2*b2),Cbar=(C1+C2)/2;
+  const G=.5*(1-Math.sqrt(Math.pow(Cbar,7)/(Math.pow(Cbar,7)+Math.pow(25,7))));
+  const ap1=(1+G)*a1,ap2=(1+G)*a2,Cp1=Math.sqrt(ap1*ap1+b1*b1),Cp2=Math.sqrt(ap2*ap2+b2*b2);
+  let hp1=rad2deg(Math.atan2(b1,ap1));if(hp1<0)hp1+=360;let hp2=rad2deg(Math.atan2(b2,ap2));if(hp2<0)hp2+=360;
+  const dLp=L2-L1,dCp=Cp2-Cp1;let dhp=0;
+  if(Cp1*Cp2!==0){dhp=hp2-hp1;if(dhp>180)dhp-=360;else if(dhp<-180)dhp+=360;}
+  const dHp=2*Math.sqrt(Cp1*Cp2)*Math.sin(deg2rad(dhp/2));
+  const Lbar=(L1+L2)/2,Cpbar=(Cp1+Cp2)/2;let hpbar=hp1+hp2;
+  if(Cp1*Cp2===0)hpbar=hp1+hp2;else if(Math.abs(hp1-hp2)<=180)hpbar=(hp1+hp2)/2;else if(hp1+hp2<360)hpbar=(hp1+hp2+360)/2;else hpbar=(hp1+hp2-360)/2;
+  const T=1-.17*Math.cos(deg2rad(hpbar-30))+.24*Math.cos(deg2rad(2*hpbar))+.32*Math.cos(deg2rad(3*hpbar+6))-.20*Math.cos(deg2rad(4*hpbar-63));
+  const dTheta=30*Math.exp(-Math.pow((hpbar-275)/25,2));
+  const Rc=2*Math.sqrt(Math.pow(Cpbar,7)/(Math.pow(Cpbar,7)+Math.pow(25,7)));
+  const Sl=1+(.015*Math.pow(Lbar-50,2))/Math.sqrt(20+Math.pow(Lbar-50,2)),Sc=1+.045*Cpbar,Sh=1+.015*Cpbar*T;
+  const Rt=-Math.sin(deg2rad(2*dTheta))*Rc;
+  const x=dLp/Sl,y=dCp/Sc,z=dHp/Sh;
+  return Math.sqrt(x*x+y*y+z*z+Rt*y*z);
 }
+function colorScore(aHex,bHex) {
+  const a=hexToRgb(aHex),b=hexToRgb(bHex);if(!a||!b)return {proximity:0,deltaE00:100};
+  const dE=deltaE2000(rgbToLab(a),rgbToLab(b));
+  return {proximity:Math.max(0,Math.min(100,100-2*dE)),deltaE00:dE};
+}
+function proximityPct(aHex,bHex){return colorScore(aHex,bHex).proximity;}
 function isValidDataImage(src) {
   return typeof src === 'string' && /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,/.test(src) && src.length < 3_000_000;
+}
+function hasSecureAssets(logo){
+  return !!(logo && isValidDataImage(logo.playImage) && typeof logo.maskBits==='string' && logo.maskBits.length>0 && logo.maskBits.length<1_000_000 && Number(logo.maskWidth)>0 && Number(logo.maskHeight)>0);
+}
+function calibrationCategory(avg){if(avg>=90)return 'easy';if(avg>=82)return 'medium';if(avg>=72)return 'hard';if(avg>=62)return 'very_hard';return 'hc';}
+function calibrationForLogo(logo){
+  const answers=Number(logo?.calibrationAnswers)||0,rounds=Number(logo?.calibrationRounds)||0,avg=answers?(Number(logo.calibrationProximityTotal)||0)/answers:0;
+  const suggestedCategory=answers>=10?calibrationCategory(avg):null;
+  const confidence=answers<10?'insufficient':answers<30?'emerging':answers<60?'reliable':'strong';
+  return {rounds,answers,averageProximity:avg,suggestedCategory,confidence,eligible:answers>=10,currentCategory:logo?.difficultyCategory||'medium',changed:!!suggestedCategory&&suggestedCategory!==logo?.difficultyCategory};
+}
+function updateCalibration(logo,results){
+  const answered=(results||[]).filter(r=>r.color);if(!answered.length)return;
+  logo.calibrationRounds=(Number(logo.calibrationRounds)||0)+1;logo.calibrationAnswers=(Number(logo.calibrationAnswers)||0)+answered.length;logo.calibrationProximityTotal=(Number(logo.calibrationProximityTotal)||0)+answered.reduce((sum,r)=>sum+(Number(r.proximity)||0),0);logo.calibrationUpdatedAt=Date.now();
 }
 function areaDifficultyScore(ratio) {
   const r=clamp(ratio,0,1); if(r>.40)return 0;if(r>.15)return 1;if(r>.05)return 2;return 3;
@@ -309,11 +363,12 @@ function resetScoresOnly() {
 function startRoundInternal(logoId,durationSeconds,meta={}) {
   if(state.activeRound) return {ok:false,error:'Une manche est déjà en cours.'};
   const logo=state.logos.find(l=>l.id===logoId); if(!logo)return {ok:false,error:'Logo introuvable.'};
+  if(!hasSecureAssets(logo))return {ok:false,error:'Ce logo doit être sécurisé avant de jouer. Laisse la page admin ouverte quelques secondes : la V3.2 le prépare automatiquement.'};
   const seconds=clamp(durationSeconds||state.settings.roundSeconds||20,5,120);
   const now=Date.now(), startedAt=now+COUNTDOWN_MS;
   const participantIds=Object.values(state.players).filter(p=>p.online).map(p=>p.id);
   state.activeRound={
-    id:uid('r_'),logoId:logo.id,logoName:logo.name,logoImage:logo.logoImage,targetColor:logo.targetColor,colorTolerance:logo.colorTolerance||42,
+    id:uid('r_'),logoId:logo.id,logoName:logo.name,playImage:logo.playImage,maskBits:logo.maskBits,maskWidth:logo.maskWidth,maskHeight:logo.maskHeight,targetColor:logo.targetColor,
     difficultyCategory:logo.difficultyCategory,difficultyLabel:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.label||'Moyen',difficultyEmoji:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.emoji||'🔵',difficultyPoints:logo.difficultyPoints,
     roundNumber:meta.roundNumber||state.roundHistory.length+1,
     tourSessionId:meta.tourSessionId||null,tourId:meta.tourId||null,tourName:meta.tourName||null,tourStageNumber:meta.tourStageNumber||null,tourStageCount:meta.tourStageCount||null,
@@ -422,6 +477,7 @@ function buildTourSummary(activeTour, reason='finished') {
   return {
     id:uid('summary_'),sessionId:activeTour.sessionId,tourId:activeTour.tourId,name:activeTour.name,reason,endedAt:Date.now(),
     completedStages:rounds.length,totalStages:activeTour.logoIds.length,
+    scoringModel:'CIEDE2000',scoreFormula:'max(0, 100 - 2 × ΔE00)',
     standings:s,awards:buildAwards(rounds,s),playerStats,stages,
     stats:{
       players:new Set(allResults.map(r=>r.playerId)).size,
@@ -441,7 +497,7 @@ function finalizeTour(reason='finished') {
   if(state.activeRound)return null;
   if(autoTimer)clearTimeout(autoTimer);autoTimer=null;
   const summary=buildTourSummary(state.activeTour,reason);
-  state.lastTourSummary=summary;state.activeTour=null;saveState();
+  state.lastTourSummary=summary;state.tourHistory.push(summary);state.tourHistory=state.tourHistory.slice(-50);state.activeTour=null;saveState();
   io.emit('tour-ended',summary);emitState();return summary;
 }
 function launchCurrentTourStage() {
@@ -470,26 +526,28 @@ function endRound(reason='timer') {
   const durationMs=round.durationSeconds*1000, participantIds=round.participantIds||[];
   const results=participantIds.map(playerId=>{
     const player=state.players[playerId];if(!player)return null;
-    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,answer.at-round.startedAt)):durationMs;
-    return {playerId:player.id,name:player.name,color:answer?.color||null,proximity:answer?proximityPct(answer.color,logo.targetColor):0,elapsedMs,mountainGain:0};
+    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,answer.at-round.startedAt)):durationMs;const score=answer?colorScore(answer.color,logo.targetColor):{proximity:0,deltaE00:null};
+    return {playerId:player.id,name:player.name,color:answer?.color||null,proximity:score.proximity,deltaE00:score.deltaE00,elapsedMs,mountainGain:0};
   }).filter(Boolean).sort((a,b)=>b.proximity-a.proximity||a.elapsedMs-b.elapsedMs);
   results.forEach((r,idx)=>{r.roundRank=idx+1;const p=state.players[r.playerId];if(!p)return;p.yellowTotal=(p.yellowTotal||0)+r.proximity;p.yellowCount=(p.yellowCount||0)+1;p.greenTime=(p.greenTime||0)+r.elapsedMs;p.participatedDurationMs=(p.participatedDurationMs||0)+durationMs;p.lastAnswer={proximity:r.proximity,elapsedMs:r.elapsedMs,color:r.color,roundId:round.id};});
   const eligible=results.filter(r=>r.color),factors=[1,.75,.5,.3,.15];
   eligible.slice(0,5).forEach((r,idx)=>{const gain=Math.max(1,Math.round(logo.difficultyPoints*factors[idx]));r.mountainGain=gain;const p=state.players[r.playerId];if(p)p.mountainPoints=(p.mountainPoints||0)+gain;});
+  updateCalibration(logo,results);
   const historyItem={
-    id:round.id,logoId:logo.id,logoName:logo.name,logoImage:logo.logoImage,targetColor:logo.targetColor,colorTolerance:logo.colorTolerance||42,
+    id:round.id,logoId:logo.id,logoName:logo.name,targetColor:logo.targetColor,colorTolerance:logo.colorTolerance||42,
     difficultyCategory:logo.difficultyCategory,difficultyLabel:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.label||'Moyen',difficultyEmoji:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.emoji||'🔵',difficultyPoints:logo.difficultyPoints,difficultyScore:logo.difficultyScore,
     roundNumber:round.roundNumber,durationMs,participantCount:participantIds.length,endedAt:Date.now(),reason,
     tourSessionId:round.tourSessionId||null,tourId:round.tourId||null,tourName:round.tourName||null,tourStageNumber:round.tourStageNumber||null,tourStageCount:round.tourStageCount||null,
-    results:results.map(r=>({...r,proximity:Number(r.proximity.toFixed(1))}))
+    results:results.map(r=>({...r,proximity:Number(r.proximity.toFixed(1)),deltaE00:r.deltaE00===null?null:Number(r.deltaE00.toFixed(3))}))
   };
   state.roundHistory.push(historyItem);state.roundHistory=state.roundHistory.slice(-300);
   const afterStandings=standings(),afterYellowRanks=rankMap(afterStandings.yellow);
   historyItem.results.forEach(r=>{r.yellowRankBefore=beforeStandings.yellow.length&&state.roundHistory.length>1?(beforeYellowRanks.get(r.playerId)||null):null;r.yellowRankAfter=afterYellowRanks.get(r.playerId)||null;r.yellowRankDelta=r.yellowRankBefore&&r.yellowRankAfter?r.yellowRankBefore-r.yellowRankAfter:0;});
   historyItem.leaderChanges=leaderChanges(beforeStandings,afterStandings);
+  const resultPayload={...historyItem,logoImage:logo.logoImage};
   state.activeRound=null;
   if(state.activeTour&&round.tourSessionId===state.activeTour.sessionId){state.activeTour.completedStages=round.tourStageNumber;state.activeTour.currentIndex=round.tourStageNumber;}
-  saveState();io.emit('round-ended',historyItem);emitState();
+  saveState();io.emit('round-ended',resultPayload);emitState();
   if(state.activeTour&&round.tourSessionId===state.activeTour.sessionId)scheduleTourContinuation();
 }
 
@@ -513,16 +571,30 @@ io.on('connection', socket=>{
   socket.on('admin-login',({password},cb=()=>{})=>{if(String(password||'')!==ADMIN_PASSWORD)return cb({ok:false,error:'Mot de passe incorrect.'});socket.data.admin=true;socket.join('admins');cb({ok:true,state:adminSnapshot(),insecureDefault:!process.env.ADMIN_PASSWORD});});
   const adminOnly=(cb)=>{if(!socket.data.admin){cb?.({ok:false,error:'Non autorisé.'});return false;}return true;};
 
+  socket.on('admin-upgrade-logo-assets',({logoId,playImage,maskBits,maskWidth,maskHeight,secureAssetsVersion},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const logo=state.logos.find(l=>l.id===logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});
+    const candidate={playImage,maskBits,maskWidth,maskHeight};if(!hasSecureAssets(candidate))return cb({ok:false,error:'Données de masque invalides.'});
+    Object.assign(logo,{playImage,maskBits,maskWidth:Number(maskWidth),maskHeight:Number(maskHeight),secureAssetsVersion:Number(secureAssetsVersion)||1});saveState();emitState();cb({ok:true});
+  });
+  socket.on('admin-apply-calibration',({logoId},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const logo=state.logos.find(l=>l.id===logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.suggestedCategory)return cb({ok:false,error:'Pas encore assez de réponses pour étalonner ce logo.'});
+    const cat=DIFFICULTY_CATEGORIES[cal.suggestedCategory];logo.difficultyMode=cal.suggestedCategory;logo.difficultyCategory=cal.suggestedCategory;logo.difficultyLabel=cat.label;logo.difficultyEmoji=cat.emoji;logo.difficultyPoints=cat.points;logo.calibrationAppliedAt=Date.now();saveState();emitState();cb({ok:true,category:cal.suggestedCategory});
+  });
+  socket.on('admin-apply-all-calibrations',(_,cb=()=>{})=>{
+    if(!adminOnly(cb))return;let changed=0;for(const logo of state.logos){const cal=calibrationForLogo(logo);if(!cal.eligible||!cal.changed)continue;const cat=DIFFICULTY_CATEGORIES[cal.suggestedCategory];logo.difficultyMode=cal.suggestedCategory;logo.difficultyCategory=cal.suggestedCategory;logo.difficultyLabel=cat.label;logo.difficultyEmoji=cat.emoji;logo.difficultyPoints=cat.points;logo.calibrationAppliedAt=Date.now();changed++;}saveState();emitState();cb({ok:true,changed});
+  });
+  socket.on('admin-clear-tour-history',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.tourHistory=[];saveState();emitState();cb({ok:true});});
+
   socket.on('admin-add-logo',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;const name=sanitizeName(payload?.name,40),targetColor=String(payload?.targetColor||'').toUpperCase(),colorTolerance=clamp(payload?.colorTolerance||42,5,90),logoImage=payload?.logoImage;
     if(!name)return cb({ok:false,error:'Nom du logo requis.'});if(!/^#[0-9A-F]{6}$/.test(targetColor))return cb({ok:false,error:'Couleur cible invalide.'});if(!isValidDataImage(logoImage))return cb({ok:false,error:'Image invalide ou trop lourde (max ~2 Mo).'});
-    const diff=computeDifficulty(payload);state.logos.push({id:uid('l_'),name,targetColor,colorTolerance,logoImage,createdAt:Date.now(),...diff});saveState();emitState();cb({ok:true});
+    const diff=computeDifficulty(payload);const secure={playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0};state.logos.push({id:uid('l_'),name,targetColor,colorTolerance,logoImage,createdAt:Date.now(),...secure,...diff});saveState();emitState();cb({ok:true});
   });
   socket.on('admin-update-logo',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound?.logoId===payload?.logoId)return cb({ok:false,error:'Impossible de modifier le logo pendant sa manche.'});const logo=state.logos.find(l=>l.id===payload?.logoId);if(!logo)return cb({ok:false,error:'Logo introuvable.'});
     const name=sanitizeName(payload?.name,40),targetColor=String(payload?.targetColor||'').toUpperCase(),colorTolerance=clamp(payload?.colorTolerance||42,5,90),logoImage=payload?.logoImage||logo.logoImage;
     if(!name)return cb({ok:false,error:'Nom du logo requis.'});if(!/^#[0-9A-F]{6}$/.test(targetColor))return cb({ok:false,error:'Couleur cible invalide.'});if(!isValidDataImage(logoImage))return cb({ok:false,error:'Image invalide ou trop lourde.'});
-    Object.assign(logo,{name,targetColor,colorTolerance,logoImage,updatedAt:Date.now(),...computeDifficulty(payload)});saveState();emitState();cb({ok:true});
+    Object.assign(logo,{name,targetColor,colorTolerance,logoImage,playImage:payload?.playImage||null,maskBits:payload?.maskBits||null,maskWidth:Number(payload?.maskWidth)||0,maskHeight:Number(payload?.maskHeight)||0,secureAssetsVersion:Number(payload?.secureAssetsVersion)||0,updatedAt:Date.now(),...computeDifficulty(payload)});saveState();emitState();cb({ok:true});
   });
   socket.on('admin-delete-logo',({logoId},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound?.logoId===logoId)return cb({ok:false,error:'Impossible pendant la manche active.'});state.logos=state.logos.filter(l=>l.id!==logoId);state.tours.forEach(t=>t.logoIds=t.logoIds.filter(id=>id!==logoId));saveState();emitState();cb({ok:true});});
 
@@ -534,7 +606,7 @@ io.on('connection', socket=>{
   socket.on('admin-delete-tour',({tourId},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeTour?.tourId===tourId)return cb({ok:false,error:'Ce Tour est en cours.'});state.tours=state.tours.filter(t=>t.id!==tourId);saveState();emitState();cb({ok:true});});
   socket.on('admin-start-tour',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Une course est déjà en cours.'});const tour=state.tours.find(t=>t.id===payload?.tourId);if(!tour)return cb({ok:false,error:'Tour introuvable.'});
-    const logoIds=tour.logoIds.filter(id=>state.logos.some(l=>l.id===id));if(!logoIds.length)return cb({ok:false,error:'Ce Tour ne contient plus de logo valide.'});if(payload?.resetScores!==false)resetScoresOnly();
+    const logoIds=tour.logoIds.filter(id=>state.logos.some(l=>l.id===id));if(!logoIds.length)return cb({ok:false,error:'Ce Tour ne contient plus de logo valide.'});const unsecured=logoIds.map(id=>state.logos.find(l=>l.id===id)).filter(l=>l&&!hasSecureAssets(l));if(unsecured.length)return cb({ok:false,error:`Sécurisation en cours pour ${unsecured.length} logo(s) : ${unsecured.slice(0,3).map(l=>l.name).join(', ')}. Réessaie dans quelques secondes.`});if(payload?.resetScores!==false)resetScoresOnly();
     state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:tour.id,name:tour.name,logoIds,currentIndex:0,completedStages:0,autoAdvance:!!payload?.autoAdvance,resultDelaySeconds:clamp(payload?.resultDelaySeconds||state.settings.resultDelaySeconds||10,5,30),roundSeconds:clamp(payload?.roundSeconds||state.settings.roundSeconds||20,5,120),startedAt:Date.now()};saveState();emitState();
     const result=launchCurrentTourStage();cb(result);
   });
@@ -549,7 +621,7 @@ io.on('connection', socket=>{
   socket.on('admin-clear-players',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Termine la course avant de vider les joueurs.'});state.players={};state.roundHistory=[];state.lastTourSummary=null;saveState();emitState();cb({ok:true});});
   socket.on('admin-new-room-code',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.roomCode=roomCode();saveState();emitState();cb({ok:true,roomCode:state.roomCode});});
 
-  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:3,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
+  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:4,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
   socket.on('admin-import-pack',({pack},cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Import impossible pendant une course.'});if(!pack||!Array.isArray(pack.logos))return cb({ok:false,error:'Fichier de pack invalide.'});
     const idMap=new Map();let added=0;
@@ -561,5 +633,5 @@ io.on('connection', socket=>{
   socket.on('disconnect',()=>{const pid=socket.data.playerId;if(pid&&state.players[pid]){state.players[pid].online=false;state.players[pid].lastSeen=Date.now();saveState();emitState();}});
 });
 
-app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour}));
+app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour,scoringModel:'CIEDE2000'}));
 server.listen(PORT,()=>{console.log(`Toon Tone Tour ${APP_VERSION} listening on :${PORT}`);console.log(`Data directory: ${DATA_DIR}`);if(!process.env.ADMIN_PASSWORD)console.warn('WARNING: ADMIN_PASSWORD is not set. Default password is "admin".');});
