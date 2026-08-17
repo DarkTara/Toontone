@@ -1,8 +1,8 @@
 {
   "name": "toon-tone-tour",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "private": true,
-  "description": "Toon Tone Tour V3.2 — multijoueur, CIEDE2000, réponse sécurisée et historique",
+  "description": "Toon Tone Tour V3.3 — fin intelligente des étapes, Tours aléatoires, préparation express et gestion d’incidents",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

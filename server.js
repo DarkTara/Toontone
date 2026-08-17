@@ -18,7 +18,7 @@ const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : pat
 const DATA_FILE = path.join(DATA_DIR, 'game-state.json');
 const DEFAULT_ROUND_SECONDS = Number(process.env.ROUND_SECONDS || 20);
 const COUNTDOWN_MS = 3000;
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 const DIFFICULTY_CATEGORIES = {
   easy:      { key:'easy',      label:'Facile',         emoji:'🟢', points:2 },
@@ -43,7 +43,11 @@ app.get('/version', (_, res) => res.json({
   scoringModel: 'CIEDE2000',
   tourHistory: true,
   difficultyCalibration: true,
-  tourAnimations: true
+  tourAnimations: true,
+  autoEndWhenAllAnswered: true,
+  randomTourOrder: true,
+  incidentControls: true,
+  quickPreparation: true
 }));
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,
@@ -74,7 +78,7 @@ function defaultState() {
     lastTourSummary: null,
     tourHistory: [],
     roundHistory: [],
-    settings: { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10 },
+    settings: { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10, autoEndWhenAllAnswered: true },
     createdAt: Date.now()
   };
 }
@@ -131,8 +135,9 @@ function loadState() {
       const loaded = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
       loaded.activeRound = null;
       loaded.activeTour = null; // un déploiement ne reprend jamais un chrono/tour en cours
-      loaded.settings ||= { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10 };
+      loaded.settings ||= { roundSeconds: DEFAULT_ROUND_SECONDS, resultDelaySeconds: 10, autoEndWhenAllAnswered: true };
       loaded.settings.resultDelaySeconds = clamp(loaded.settings.resultDelaySeconds || 10, 5, 30);
+      loaded.settings.autoEndWhenAllAnswered = loaded.settings.autoEndWhenAllAnswered !== false;
       loaded.logos = (loaded.logos || []).map(normalizeLogo);
       loaded.tours = (loaded.tours || []).map(normalizeTour);
       loaded.roundHistory ||= [];
@@ -158,6 +163,7 @@ function loadState() {
 let state = loadState();
 let roundTimer = null;
 let autoTimer = null;
+let completionTimer = null;
 
 function saveState() {
   const tmp = DATA_FILE + '.tmp';
@@ -167,8 +173,10 @@ function saveState() {
 function clearTimers() {
   if (roundTimer) clearTimeout(roundTimer);
   if (autoTimer) clearTimeout(autoTimer);
+  if (completionTimer) clearTimeout(completionTimer);
   roundTimer = null;
   autoTimer = null;
+  completionTimer = null;
 }
 function totalCompletedDurationMs() {
   return state.roundHistory.reduce((sum, h) => sum + historyDurationMs(h, state.settings), 0);
@@ -212,7 +220,9 @@ function activeTourPublic() {
     sessionId:t.sessionId, tourId:t.tourId, name:t.name,
     currentIndex:t.currentIndex, completedStages:t.completedStages || 0,
     totalStages:t.logoIds.length, autoAdvance:!!t.autoAdvance,
+    randomOrder:!!t.randomOrder, autoEndWhenAllAnswered:t.autoEndWhenAllAnswered!==false,
     resultDelaySeconds:t.resultDelaySeconds, roundSeconds:t.roundSeconds,
+    skippedStages:Array.isArray(t.skippedStages)?t.skippedStages:[],
     startedAt:t.startedAt, nextLogoId, nextLogoName:nextLogo?.name || null
   };
 }
@@ -242,6 +252,10 @@ function basicSnapshot() {
       participantIds: state.activeRound.participantIds || [],
       participantCount: (state.activeRound.participantIds || []).length,
       answeredPlayerIds: Object.keys(state.activeRound.answers || {}),
+      paused: !!state.activeRound.paused,
+      pausedAt: state.activeRound.pausedAt || null,
+      pauseRemainingMs: state.activeRound.pauseRemainingMs ?? null,
+      autoEndWhenAllAnswered: state.activeRound.autoEndWhenAllAnswered !== false,
       startedAt: state.activeRound.startedAt, endsAt: state.activeRound.endsAt,
       durationSeconds: state.activeRound.durationSeconds,
       answerCount: Object.keys(state.activeRound.answers || {}).length
@@ -353,6 +367,58 @@ function leaderChanges(before,after) {
   return Object.keys(labels).map(type=>{const b=leaderFromRows(before[type],type),a=leaderFromRows(after[type],type);return {...labels[type],before:b?{id:b.id,name:b.name}:null,after:a?{id:a.id,name:a.name}:null,changed:(b?.id||null)!==(a?.id||null)};}).filter(x=>x.after);
 }
 
+function shuffleArray(items) {
+  const a=[...items];
+  for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}
+  return a;
+}
+function emitToPlayer(playerId,event,payload={}) {
+  for(const s of io.sockets.sockets.values()) if(s.data.playerId===playerId) s.emit(event,payload);
+}
+function scheduleRoundTimer(round=state.activeRound) {
+  if(roundTimer) clearTimeout(roundTimer); roundTimer=null;
+  if(!round || round.paused) return;
+  const wait=Math.max(0,round.endsAt-Date.now())+100;
+  roundTimer=setTimeout(()=>{if(state.activeRound?.id===round.id)endRound('timer');},wait);
+}
+function maybeAutoEndRound() {
+  const r=state.activeRound;
+  if(completionTimer){clearTimeout(completionTimer);completionTimer=null;}
+  if(!r || r.paused || r.autoEndWhenAllAnswered===false || Date.now()<r.startedAt) return false;
+  const participants=r.participantIds||[], answers=r.answers||{};
+  if(!participants.length || participants.some(id=>!answers[id])) return false;
+  const id=r.id;
+  completionTimer=setTimeout(()=>{
+    completionTimer=null;
+    const current=state.activeRound;
+    if(current?.id===id && !current.paused && (current.participantIds||[]).length>0 && (current.participantIds||[]).every(pid=>current.answers?.[pid])) endRound('all_answered');
+  },450);
+  return true;
+}
+function cancelActiveRound(mode='replay') {
+  const round=state.activeRound;if(!round)return {ok:false,error:'Aucune étape en cours.'};
+  if(roundTimer)clearTimeout(roundTimer);roundTimer=null;if(completionTimer)clearTimeout(completionTimer);completionTimer=null;
+  state.activeRound=null;
+  const isTour=!!(state.activeTour&&round.tourSessionId===state.activeTour.sessionId);
+  if(isTour){
+    state.activeTour.incidents ||= [];
+    state.activeTour.incidents.push({type:mode==='skip'?'stage_skipped':'stage_cancelled',stageNumber:round.tourStageNumber,logoName:round.logoName,at:Date.now()});
+    if(mode==='skip'){
+      state.activeTour.skippedStages ||= [];
+      state.activeTour.skippedStages.push({stageNumber:round.tourStageNumber,logoId:round.logoId,logoName:round.logoName,at:Date.now()});
+      state.activeTour.currentIndex=round.tourStageNumber;
+      state.activeTour.completedStages=Math.max(state.activeTour.completedStages||0,round.tourStageNumber);
+    } else {
+      state.activeTour.currentIndex=Math.max(0,(round.tourStageNumber||1)-1);
+      state.activeTour.completedStages=Math.min(state.activeTour.completedStages||0,state.activeTour.currentIndex);
+    }
+  }
+  saveState();io.emit('round-cancelled',{mode,isTour,logoName:round.logoName,stageNumber:round.tourStageNumber||round.roundNumber});emitState();
+  if(isTour&&mode==='skip')scheduleTourContinuation();
+  else if(isTour&&mode==='replay'&&state.activeTour?.autoAdvance){if(autoTimer)clearTimeout(autoTimer);autoTimer=setTimeout(()=>{autoTimer=null;launchCurrentTourStage();},1200);}
+  return {ok:true,isTour,mode};
+}
+
 function resetScoresOnly() {
   Object.values(state.players).forEach(p=>{
     p.yellowTotal=0;p.yellowCount=0;p.greenTime=0;p.participatedDurationMs=0;p.mountainPoints=0;p.lastAnswer=null;
@@ -363,7 +429,7 @@ function resetScoresOnly() {
 function startRoundInternal(logoId,durationSeconds,meta={}) {
   if(state.activeRound) return {ok:false,error:'Une manche est déjà en cours.'};
   const logo=state.logos.find(l=>l.id===logoId); if(!logo)return {ok:false,error:'Logo introuvable.'};
-  if(!hasSecureAssets(logo))return {ok:false,error:'Ce logo doit être sécurisé avant de jouer. Laisse la page admin ouverte quelques secondes : la V3.2 le prépare automatiquement.'};
+  if(!hasSecureAssets(logo))return {ok:false,error:'Ce logo doit être sécurisé avant de jouer. Laisse la page admin ouverte quelques secondes : la V3.3 le prépare automatiquement.'};
   const seconds=clamp(durationSeconds||state.settings.roundSeconds||20,5,120);
   const now=Date.now(), startedAt=now+COUNTDOWN_MS;
   const participantIds=Object.values(state.players).filter(p=>p.online).map(p=>p.id);
@@ -372,10 +438,12 @@ function startRoundInternal(logoId,durationSeconds,meta={}) {
     difficultyCategory:logo.difficultyCategory,difficultyLabel:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.label||'Moyen',difficultyEmoji:DIFFICULTY_CATEGORIES[logo.difficultyCategory]?.emoji||'🔵',difficultyPoints:logo.difficultyPoints,
     roundNumber:meta.roundNumber||state.roundHistory.length+1,
     tourSessionId:meta.tourSessionId||null,tourId:meta.tourId||null,tourName:meta.tourName||null,tourStageNumber:meta.tourStageNumber||null,tourStageCount:meta.tourStageCount||null,
-    participantIds,durationSeconds:seconds,createdAt:now,startedAt,endsAt:startedAt+seconds*1000,answers:{}
+    participantIds,durationSeconds:seconds,createdAt:now,startedAt,endsAt:startedAt+seconds*1000,answers:{},
+    paused:false,pausedAt:null,pauseRemainingMs:null,totalPausedMs:0,
+    autoEndWhenAllAnswered:meta.autoEndWhenAllAnswered!==undefined?!!meta.autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false
   };
   saveState();emitState();
-  roundTimer=setTimeout(()=>endRound('timer'),COUNTDOWN_MS+seconds*1000+100);
+  scheduleRoundTimer(state.activeRound);
   return {ok:true,participantCount:participantIds.length};
 }
 
@@ -476,11 +544,12 @@ function buildTourSummary(activeTour, reason='finished') {
 
   return {
     id:uid('summary_'),sessionId:activeTour.sessionId,tourId:activeTour.tourId,name:activeTour.name,reason,endedAt:Date.now(),
-    completedStages:rounds.length,totalStages:activeTour.logoIds.length,
+    completedStages:rounds.length+(activeTour.skippedStages?.length||0),scoredStages:rounds.length,processedStages:rounds.length+(activeTour.skippedStages?.length||0),totalStages:activeTour.logoIds.length,
+    skippedStages:activeTour.skippedStages||[],incidents:activeTour.incidents||[],randomOrder:!!activeTour.randomOrder,
     scoringModel:'CIEDE2000',scoreFormula:'max(0, 100 - 2 × ΔE00)',
     standings:s,awards:buildAwards(rounds,s),playerStats,stages,
     stats:{
-      players:new Set(allResults.map(r=>r.playerId)).size,
+      players:new Set(allResults.map(r=>r.playerId)).size,skippedStages:activeTour.skippedStages?.length||0,
       answers:answered.length,totalOpportunities,responseRate:totalOpportunities?answered.length/totalOpportunities*100:0,
       averageProximity:answered.length?answered.reduce((x,r)=>x+(Number(r.proximity)||0),0)/answered.length:0,
       medianProximity:median(answered.map(r=>Number(r.proximity)||0)),
@@ -505,7 +574,8 @@ function launchCurrentTourStage() {
   if(t.currentIndex>=t.logoIds.length){finalizeTour('finished');return {ok:true,finished:true};}
   const logoId=t.logoIds[t.currentIndex];
   const res=startRoundInternal(logoId,t.roundSeconds,{
-    roundNumber:t.currentIndex+1,tourSessionId:t.sessionId,tourId:t.tourId,tourName:t.name,tourStageNumber:t.currentIndex+1,tourStageCount:t.logoIds.length
+    roundNumber:t.currentIndex+1,tourSessionId:t.sessionId,tourId:t.tourId,tourName:t.name,tourStageNumber:t.currentIndex+1,tourStageCount:t.logoIds.length,
+    autoEndWhenAllAnswered:t.autoEndWhenAllAnswered!==false
   });
   if(!res.ok){t.currentIndex++;saveState();return launchCurrentTourStage();}
   return res;
@@ -519,14 +589,14 @@ function scheduleTourContinuation() {
 
 function endRound(reason='timer') {
   if(!state.activeRound)return;
-  if(roundTimer)clearTimeout(roundTimer);roundTimer=null;
+  if(roundTimer)clearTimeout(roundTimer);roundTimer=null;if(completionTimer)clearTimeout(completionTimer);completionTimer=null;
   const round=state.activeRound, logo=state.logos.find(l=>l.id===round.logoId);
   if(!logo){state.activeRound=null;saveState();emitState();return;}
   const beforeStandings=standings(), beforeYellowRanks=rankMap(beforeStandings.yellow);
   const durationMs=round.durationSeconds*1000, participantIds=round.participantIds||[];
   const results=participantIds.map(playerId=>{
     const player=state.players[playerId];if(!player)return null;
-    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,answer.at-round.startedAt)):durationMs;const score=answer?colorScore(answer.color,logo.targetColor):{proximity:0,deltaE00:null};
+    const answer=round.answers[player.id];const elapsedMs=answer?Math.min(durationMs,Math.max(0,Number(answer.elapsedMs ?? (answer.at-round.startedAt-(round.totalPausedMs||0))))):durationMs;const score=answer?colorScore(answer.color,logo.targetColor):{proximity:0,deltaE00:null};
     return {playerId:player.id,name:player.name,color:answer?.color||null,proximity:score.proximity,deltaE00:score.deltaE00,elapsedMs,mountainGain:0};
   }).filter(Boolean).sort((a,b)=>b.proximity-a.proximity||a.elapsedMs-b.elapsedMs);
   results.forEach((r,idx)=>{r.roundRank=idx+1;const p=state.players[r.playerId];if(!p)return;p.yellowTotal=(p.yellowTotal||0)+r.proximity;p.yellowCount=(p.yellowCount||0)+1;p.greenTime=(p.greenTime||0)+r.elapsedMs;p.participatedDurationMs=(p.participatedDurationMs||0)+durationMs;p.lastAnswer={proximity:r.proximity,elapsedMs:r.elapsedMs,color:r.color,roundId:round.id};});
@@ -563,9 +633,10 @@ io.on('connection', socket=>{
   });
   socket.on('submit-color',({roundId,color},cb=()=>{})=>{
     const pid=socket.data.playerId,round=state.activeRound;if(!pid||!state.players[pid])return cb({ok:false,error:'Joueur non connecté.'});if(!round||round.id!==roundId)return cb({ok:false,error:'Cette manche est terminée.'});
-    if(!(round.participantIds||[]).includes(pid))return cb({ok:false,error:'Tu as rejoint pendant la manche : tu participeras à la prochaine étape.'});if(Date.now()<round.startedAt)return cb({ok:false,error:'Le départ n’est pas encore donné.'});
+    if(!(round.participantIds||[]).includes(pid))return cb({ok:false,error:'Tu as rejoint pendant la manche : tu participeras à la prochaine étape.'});if(Date.now()<round.startedAt)return cb({ok:false,error:'Le départ n’est pas encore donné.'});if(round.paused)return cb({ok:false,error:'La direction de course a mis l’étape en pause.'});
     if(!/^#[0-9a-fA-F]{6}$/.test(String(color||'')))return cb({ok:false,error:'Couleur invalide.'});if(round.answers[pid])return cb({ok:false,error:'Réponse déjà envoyée.'});if(Date.now()>round.endsAt+300)return cb({ok:false,error:'Temps écoulé.'});
-    round.answers[pid]={color:color.toUpperCase(),at:Date.now()};state.players[pid].lastSeen=Date.now();saveState();io.to('admins').emit('admin-state',adminSnapshot());cb({ok:true,elapsedMs:round.answers[pid].at-round.startedAt});
+    const at=Date.now(),elapsedMs=Math.min(round.durationSeconds*1000,Math.max(0,at-round.startedAt-(round.totalPausedMs||0)));
+    round.answers[pid]={color:color.toUpperCase(),at,elapsedMs};state.players[pid].lastSeen=Date.now();saveState();io.to('admins').emit('admin-state',adminSnapshot());cb({ok:true,elapsedMs});maybeAutoEndRound();
   });
 
   socket.on('admin-login',({password},cb=()=>{})=>{if(String(password||'')!==ADMIN_PASSWORD)return cb({ok:false,error:'Mot de passe incorrect.'});socket.data.admin=true;socket.join('admins');cb({ok:true,state:adminSnapshot(),insecureDefault:!process.env.ADMIN_PASSWORD});});
@@ -606,22 +677,47 @@ io.on('connection', socket=>{
   socket.on('admin-delete-tour',({tourId},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeTour?.tourId===tourId)return cb({ok:false,error:'Ce Tour est en cours.'});state.tours=state.tours.filter(t=>t.id!==tourId);saveState();emitState();cb({ok:true});});
   socket.on('admin-start-tour',(payload,cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Une course est déjà en cours.'});const tour=state.tours.find(t=>t.id===payload?.tourId);if(!tour)return cb({ok:false,error:'Tour introuvable.'});
-    const logoIds=tour.logoIds.filter(id=>state.logos.some(l=>l.id===id));if(!logoIds.length)return cb({ok:false,error:'Ce Tour ne contient plus de logo valide.'});const unsecured=logoIds.map(id=>state.logos.find(l=>l.id===id)).filter(l=>l&&!hasSecureAssets(l));if(unsecured.length)return cb({ok:false,error:`Sécurisation en cours pour ${unsecured.length} logo(s) : ${unsecured.slice(0,3).map(l=>l.name).join(', ')}. Réessaie dans quelques secondes.`});if(payload?.resetScores!==false)resetScoresOnly();
-    state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:tour.id,name:tour.name,logoIds,currentIndex:0,completedStages:0,autoAdvance:!!payload?.autoAdvance,resultDelaySeconds:clamp(payload?.resultDelaySeconds||state.settings.resultDelaySeconds||10,5,30),roundSeconds:clamp(payload?.roundSeconds||state.settings.roundSeconds||20,5,120),startedAt:Date.now()};saveState();emitState();
+    let logoIds=tour.logoIds.filter(id=>state.logos.some(l=>l.id===id));if(!logoIds.length)return cb({ok:false,error:'Ce Tour ne contient plus de logo valide.'});const unsecured=logoIds.map(id=>state.logos.find(l=>l.id===id)).filter(l=>l&&!hasSecureAssets(l));if(unsecured.length)return cb({ok:false,error:`Sécurisation en cours pour ${unsecured.length} logo(s) : ${unsecured.slice(0,3).map(l=>l.name).join(', ')}. Réessaie dans quelques secondes.`});if(payload?.resetScores!==false)resetScoresOnly();
+    const randomOrder=!!payload?.randomOrder;if(randomOrder)logoIds=shuffleArray(logoIds);
+    state.lastTourSummary=null;state.activeTour={sessionId:uid('tour_'),tourId:tour.id,name:tour.name,logoIds,currentIndex:0,completedStages:0,autoAdvance:!!payload?.autoAdvance,randomOrder,autoEndWhenAllAnswered:payload?.autoEndWhenAllAnswered!==false,skippedStages:[],incidents:[],resultDelaySeconds:clamp(payload?.resultDelaySeconds||state.settings.resultDelaySeconds||10,5,30),roundSeconds:clamp(payload?.roundSeconds||state.settings.roundSeconds||20,5,120),startedAt:Date.now()};saveState();emitState();
     const result=launchCurrentTourStage();cb(result);
   });
   socket.on('admin-next-tour-round',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});if(state.activeRound)return cb({ok:false,error:'Une étape est déjà en cours.'});if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}cb(launchCurrentTourStage());});
   socket.on('admin-finish-tour',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});if(state.activeRound)return cb({ok:false,error:'Termine l’étape en cours avant le Tour.'});const summary=finalizeTour('manual');cb({ok:true,summary});});
-  socket.on('admin-toggle-auto-tour',({autoAdvance},cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});state.activeTour.autoAdvance=!!autoAdvance;saveState();emitState();if(state.activeTour.autoAdvance&&!state.activeRound&&!autoTimer)scheduleTourContinuation();cb({ok:true});});
+  socket.on('admin-toggle-auto-tour',({autoAdvance},cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeTour)return cb({ok:false,error:'Aucun Tour en cours.'});state.activeTour.autoAdvance=!!autoAdvance;if(!state.activeTour.autoAdvance&&autoTimer){clearTimeout(autoTimer);autoTimer=null;}saveState();emitState();if(state.activeTour.autoAdvance&&!state.activeRound&&!autoTimer)scheduleTourContinuation();cb({ok:true});});
 
-  socket.on('admin-start-round',({logoId,durationSeconds},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeTour)return cb({ok:false,error:'Un Tour est en cours : utilise “Étape suivante”.'});cb(startRoundInternal(logoId,durationSeconds));});
+  socket.on('admin-pause-round',(_,cb=()=>{})=>{
+    if(!adminOnly(cb))return;const r=state.activeRound;if(!r)return cb({ok:false,error:'Aucune étape en cours.'});if(r.paused)return cb({ok:false,error:'L’étape est déjà en pause.'});if(Date.now()<r.startedAt)return cb({ok:false,error:'Attends le GO avant de mettre en pause.'});
+    if(roundTimer)clearTimeout(roundTimer);roundTimer=null;if(completionTimer)clearTimeout(completionTimer);completionTimer=null;
+    r.paused=true;r.pausedAt=Date.now();r.pauseRemainingMs=Math.max(0,r.endsAt-r.pausedAt);if(state.activeTour)state.activeTour.incidents?.push({type:'pause',stageNumber:r.tourStageNumber,at:Date.now()});saveState();emitState();cb({ok:true});
+  });
+  socket.on('admin-resume-round',(_,cb=()=>{})=>{
+    if(!adminOnly(cb))return;const r=state.activeRound;if(!r)return cb({ok:false,error:'Aucune étape en cours.'});if(!r.paused)return cb({ok:false,error:'L’étape n’est pas en pause.'});
+    const now=Date.now(),pauseMs=Math.max(0,now-(r.pausedAt||now));r.totalPausedMs=(r.totalPausedMs||0)+pauseMs;r.endsAt=now+Math.max(0,Number(r.pauseRemainingMs)||0);r.paused=false;r.pausedAt=null;r.pauseRemainingMs=null;if(state.activeTour)state.activeTour.incidents?.push({type:'resume',stageNumber:r.tourStageNumber,at:now,pauseMs});saveState();emitState();scheduleRoundTimer(r);maybeAutoEndRound();cb({ok:true});
+  });
+  socket.on('admin-add-round-time',({seconds},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const r=state.activeRound;if(!r)return cb({ok:false,error:'Aucune étape en cours.'});const add=clamp(seconds||10,1,60);r.durationSeconds=clamp(r.durationSeconds+add,5,180);r.endsAt+=add*1000;if(r.paused)r.pauseRemainingMs=(Number(r.pauseRemainingMs)||0)+add*1000;else scheduleRoundTimer(r);if(state.activeTour)state.activeTour.incidents?.push({type:'extra_time',stageNumber:r.tourStageNumber,at:Date.now(),seconds:add});saveState();emitState();cb({ok:true,seconds:add});
+  });
+  socket.on('admin-cancel-round',({mode},cb=()=>{})=>{if(!adminOnly(cb))return;cb(cancelActiveRound(mode==='skip'?'skip':'replay'));});
+  socket.on('admin-reset-player-answer',({playerId},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const r=state.activeRound;if(!r)return cb({ok:false,error:'Aucune étape en cours.'});if(!(r.participantIds||[]).includes(playerId))return cb({ok:false,error:'Ce joueur ne participe pas à cette étape.'});if(!r.answers?.[playerId])return cb({ok:false,error:'Ce joueur n’a pas encore répondu.'});delete r.answers[playerId];if(completionTimer)clearTimeout(completionTimer);completionTimer=null;if(state.activeTour)state.activeTour.incidents?.push({type:'answer_reset',stageNumber:r.tourStageNumber,playerId,at:Date.now()});saveState();emitToPlayer(playerId,'answer-reset',{roundId:r.id});emitState();cb({ok:true});
+  });
+  socket.on('admin-exclude-player-from-round',({playerId},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const r=state.activeRound;if(!r)return cb({ok:false,error:'Aucune étape en cours.'});if(!(r.participantIds||[]).includes(playerId))return cb({ok:false,error:'Ce joueur est déjà hors de l’étape.'});delete r.answers?.[playerId];r.participantIds=r.participantIds.filter(id=>id!==playerId);if(state.activeTour)state.activeTour.incidents?.push({type:'player_excluded',stageNumber:r.tourStageNumber,playerId,at:Date.now()});saveState();emitToPlayer(playerId,'round-excluded',{roundId:r.id});emitState();maybeAutoEndRound();cb({ok:true});
+  });
+  socket.on('admin-rename-player',({playerId,name},cb=()=>{})=>{if(!adminOnly(cb))return;const p=state.players[playerId];if(!p)return cb({ok:false,error:'Joueur introuvable.'});const clean=sanitizeName(name,24);if(!clean)return cb({ok:false,error:'Nom invalide.'});p.name=clean;saveState();emitState();cb({ok:true,name:clean});});
+  socket.on('admin-remove-player',({playerId},cb=()=>{})=>{
+    if(!adminOnly(cb))return;const p=state.players[playerId];if(!p)return cb({ok:false,error:'Joueur introuvable.'});if(state.activeRound){delete state.activeRound.answers?.[playerId];state.activeRound.participantIds=(state.activeRound.participantIds||[]).filter(id=>id!==playerId);}delete state.players[playerId];emitToPlayer(playerId,'player-removed',{});saveState();emitState();maybeAutoEndRound();cb({ok:true});
+  });
+
+  socket.on('admin-start-round',({logoId,durationSeconds,autoEndWhenAllAnswered},cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeTour)return cb({ok:false,error:'Un Tour est en cours : utilise “Étape suivante”.'});cb(startRoundInternal(logoId,durationSeconds,{autoEndWhenAllAnswered:autoEndWhenAllAnswered!==undefined?!!autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false}));});
   socket.on('admin-end-round',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(!state.activeRound)return cb({ok:false,error:'Aucune manche.'});if(Date.now()<state.activeRound.startedAt)return cb({ok:false,error:'Le compte à rebours est encore en cours.'});endRound('manual');cb({ok:true});});
-  socket.on('admin-update-settings',({roundSeconds,resultDelaySeconds},cb=()=>{})=>{if(!adminOnly(cb))return;if(roundSeconds!==undefined)state.settings.roundSeconds=clamp(roundSeconds,5,120);if(resultDelaySeconds!==undefined)state.settings.resultDelaySeconds=clamp(resultDelaySeconds,5,30);saveState();emitState();cb({ok:true});});
+  socket.on('admin-update-settings',({roundSeconds,resultDelaySeconds,autoEndWhenAllAnswered},cb=()=>{})=>{if(!adminOnly(cb))return;if(roundSeconds!==undefined)state.settings.roundSeconds=clamp(roundSeconds,5,120);if(resultDelaySeconds!==undefined)state.settings.resultDelaySeconds=clamp(resultDelaySeconds,5,30);if(autoEndWhenAllAnswered!==undefined)state.settings.autoEndWhenAllAnswered=!!autoEndWhenAllAnswered;saveState();emitState();cb({ok:true});});
   socket.on('admin-reset-scores',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Termine la course avant de réinitialiser.'});resetScoresOnly();state.lastTourSummary=null;saveState();emitState();cb({ok:true});});
   socket.on('admin-clear-players',(_,cb=()=>{})=>{if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Termine la course avant de vider les joueurs.'});state.players={};state.roundHistory=[];state.lastTourSummary=null;saveState();emitState();cb({ok:true});});
   socket.on('admin-new-room-code',(_,cb=()=>{})=>{if(!adminOnly(cb))return;state.roomCode=roomCode();saveState();emitState();cb({ok:true,roomCode:state.roomCode});});
 
-  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:4,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
+  socket.on('admin-export-pack',(_,cb=()=>{})=>{if(!adminOnly(cb))return;cb({ok:true,pack:{format:'toon-tone-tour-pack',version:5,exportedAt:Date.now(),logos:state.logos,tours:state.tours}});});
   socket.on('admin-import-pack',({pack},cb=()=>{})=>{
     if(!adminOnly(cb))return;if(state.activeRound||state.activeTour)return cb({ok:false,error:'Import impossible pendant une course.'});if(!pack||!Array.isArray(pack.logos))return cb({ok:false,error:'Fichier de pack invalide.'});
     const idMap=new Map();let added=0;
@@ -633,5 +729,5 @@ io.on('connection', socket=>{
   socket.on('disconnect',()=>{const pid=socket.data.playerId;if(pid&&state.players[pid]){state.players[pid].online=false;state.players[pid].lastSeen=Date.now();saveState();emitState();}});
 });
 
-app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour,scoringModel:'CIEDE2000'}));
+app.get('/health',(_,res)=>res.json({ok:true,roomCode:state.roomCode,players:Object.keys(state.players).length,version:APP_VERSION,activeTour:!!state.activeTour,scoringModel:'CIEDE2000',autoEndWhenAllAnswered:state.settings.autoEndWhenAllAnswered!==false}));
 server.listen(PORT,()=>{console.log(`Toon Tone Tour ${APP_VERSION} listening on :${PORT}`);console.log(`Data directory: ${DATA_DIR}`);if(!process.env.ADMIN_PASSWORD)console.warn('WARNING: ADMIN_PASSWORD is not set. Default password is "admin".');});

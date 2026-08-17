@@ -1,8 +1,60 @@
-# Toon Tone Tour V3.2 🚲🎨
+# Toon Tone Tour V3.3 🚲🎨
 
 Jeu multijoueur temps réel de reconnaissance de couleurs de logos, avec une identité Tour de France. Déploiement prévu sur **GitHub + Railway**.
 
-## Nouveautés V3.2
+## Nouveautés V3.3
+
+### ✅ Fin intelligente des étapes
+
+Par défaut, une étape se termine automatiquement dès que **tous les joueurs qui étaient en ligne au départ de l’étape** ont validé leur réponse. Les joueurs qui rejoignent en cours d’étape ne bloquent pas la fin automatique.
+
+Si un joueur se déconnecte ou rencontre un problème, l’animateur peut le retirer uniquement de l’étape en cours depuis la carte **Joueurs**. Il n’est alors pas pénalisé et la fin automatique est recalculée immédiatement.
+
+Cette option peut être désactivée depuis la préparation du Tour ou le mode libre.
+
+### 🔀 Ordre aléatoire des Tours
+
+Deux possibilités :
+
+- **Mélanger** dans l’éditeur : l’ordre visible de la playlist est modifié, puis peut être sauvegardé.
+- **Ordre aléatoire à chaque départ** : la playlist enregistrée reste intacte, mais une nouvelle permutation est créée pour chaque partie.
+
+L’historique conserve naturellement l’ordre réellement joué.
+
+### ⚡ Préparation express
+
+La direction de course peut désormais :
+
+- générer automatiquement un Tour de 5, 10, 15, 20… étapes ;
+- choisir une sélection **100 % aléatoire** ou **équilibrée par difficulté** ;
+- ajouter tout le catalogue en un clic ;
+- mélanger ou vider la playlist ;
+- dupliquer un Tour existant ;
+- utiliser **Enregistrer & lancer** pour partir directement ;
+- voir avant le départ une estimation de durée, le nombre de joueurs en ligne, la répartition des difficultés, l’état de sécurisation et les éventuels doublons.
+
+### 🛠️ Gestion d’incidents
+
+Pendant une étape, l’animateur dispose maintenant de :
+
+- **Pause / Reprendre** : le chrono est gelé et le temps de pause n’entre pas dans le temps de réponse ;
+- **+10 s** : ajoute du temps au chrono ;
+- **Terminer maintenant** ;
+- **Annuler & rejouer** : aucun score n’est enregistré et la même étape peut repartir ;
+- **Passer l’étape** dans un Tour : aucun score n’est attribué et le Tour continue.
+
+Pour chaque joueur, l’animateur peut aussi :
+
+- le renommer ;
+- lui rendre sa réponse pour qu’il valide à nouveau ;
+- le retirer uniquement de l’étape en cours ;
+- supprimer un joueur, utile en cas de doublon.
+
+Les pauses, ajouts de temps, annulations et sauts d’étapes d’un Tour sont conservés dans les données de la partie archivée.
+
+---
+
+## Fonctionnalités héritées de la V3.2
 
 ### 🔐 La vraie réponse reste côté serveur
 Pendant une manche, le navigateur joueur ne reçoit plus :
@@ -17,7 +69,7 @@ Il reçoit uniquement :
 
 La vraie couleur et le logo original ne sont envoyés qu'après l'arrivée de l'étape.
 
-Les logos créés avec une version précédente sont **sécurisés automatiquement par la page admin** au premier chargement de la V3.2. Laisse simplement `/admin.html` ouvert quelques secondes avant de lancer une course.
+Les logos créés avec une version précédente sont **sécurisés automatiquement par la page admin** au premier chargement de la V3.3. Laisse simplement `/admin.html` ouvert quelques secondes avant de lancer une course.
 
 ### 🧪 Score CIEDE2000
 Le classement jaune utilise maintenant **CIEDE2000 (ΔE00)**, une mesure colorimétrique plus proche de la perception humaine que ΔE76.
@@ -114,11 +166,11 @@ Le projet doit être placé **directement à la racine du dépôt GitHub** :
     └── styles.css
 ```
 
-Après déploiement, `/version` doit retourner `3.2.0` avec `secureClientAnswer: true` et `scoringModel: "CIEDE2000"`.
+Après déploiement, `/version` doit retourner `3.3.0` avec `secureClientAnswer: true`, `scoringModel: "CIEDE2000"`, `autoEndWhenAllAnswered: true`, `randomTourOrder: true` et `incidentControls: true`.
 
-## Migration depuis V3.1
+## Migration depuis V3.2 (ou une version précédente)
 
-1. Remplace les fichiers du dépôt par ceux de la V3.2.
+1. Remplace les fichiers du dépôt par ceux de la V3.3.
 2. Laisse Railway redéployer.
 3. Ouvre `/admin.html` et connecte-toi.
 4. Attends que le message **Sécurisation des anciens logos** disparaisse.
