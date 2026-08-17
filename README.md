@@ -1,3 +1,11 @@
+# Toon Tone Tour V2.1
+
+**Important : ce ZIP est préparé pour être extrait directement à la racine du dépôt GitHub.**
+
+Après déploiement, ouvre `/version` sur ton domaine Railway. Tu dois obtenir `{"version":"2.1.0","selectiveRecolor":true}`.
+
+Le pied de page joueur doit également afficher **V2.1 · recoloration sélective**.
+
 # Toon Tone Tour 🚲🎨
 
 Jeu multijoueur temps réel inspiré d'un jeu de recherche de couleur, habillé façon Tour de France.

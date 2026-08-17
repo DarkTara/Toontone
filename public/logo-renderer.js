@@ -102,7 +102,13 @@
 
     rebuildMask(targetHex, tolerance);
     render(null);
-    return { render, rebuildMask, sampleAtEvent, width: w, height: h };
+    function maskStats() {
+      let count = 0;
+      for (const v of mask) count += v;
+      return { matchedPixels: count, totalPixels: mask.length, ratio: mask.length ? count / mask.length : 0 };
+    }
+
+    return { render, rebuildMask, sampleAtEvent, maskStats, width: w, height: h };
   }
 
   window.LogoTone = { create };

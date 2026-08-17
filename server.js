@@ -17,10 +17,20 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
 const DATA_DIR = process.env.DATA_DIR || (fs.existsSync('/data') ? '/data' : path.join(__dirname, 'local-data'));
 const DATA_FILE = path.join(DATA_DIR, 'game-state.json');
 const DEFAULT_ROUND_SECONDS = Number(process.env.ROUND_SECONDS || 20);
+const APP_VERSION = '2.1.0';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 app.use(express.json({ limit: '4mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.get('/version', (req, res) => res.json({ version: APP_VERSION, selectiveRecolor: true }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  lastModified: false,
+  setHeaders(res) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+}));
 
 function uid(prefix = '') {
   return prefix + crypto.randomBytes(6).toString('hex');
